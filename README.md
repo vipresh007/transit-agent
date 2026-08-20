@@ -107,6 +107,19 @@ One researcher per day of the trip running in parallel, a synthesizer merging
 them into one itinerary. Now compare hand-rolled vs LangGraph and you'll have
 earned an opinion.
 
+## Gotchas hit so far
+
+**`400 Function call is missing a thought_signature`**
+Gemini's thinking models sign their reasoning and attach it to tool calls in
+`tool_calls[N].extra_content.google.thought_signature` — a field the OpenAI
+schema knows nothing about. Rebuilding the assistant message by hand drops it,
+and the next turn is rejected. Fix: append `message.model_dump()` instead, so
+provider extras round-trip. Escape hatch: `THINKING_BUDGET=0` in `.env`.
+
+This is the general shape of the tradeoff with compatibility layers — portable
+code, but provider-specific features leak. Worth remembering before you assume
+"OpenAI-compatible" means drop-in.
+
 ## Notes
 
 - Nominatim and Overpass are volunteer-run. Cache aggressively, don't hammer them.

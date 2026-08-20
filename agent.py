@@ -38,6 +38,29 @@ client = OpenAI(
 MODEL = os.getenv("MODEL", "gemini-2.5-flash")
 MAX_STEPS = 10  # a runaway loop is the classic first bug; cap it
 
+# Gemini's thinking models sign their reasoning and attach the signature to
+# each tool call in a NON-STANDARD field:
+#     tool_calls[0].extra_content.google.thought_signature
+# If you don't echo it back on the next turn, Gemini 400s with
+# "Function call is missing a thought_signature".
+#
+# The OpenAI SDK keeps unknown fields in .model_extra, so the fix is to hand
+# the whole message object back rather than rebuilding it field by field.
+# Lesson: an OpenAI-compatible endpoint is compatible, not identical.
+#
+# Set THINKING_BUDGET=0 in .env to turn thinking off instead — no reasoning,
+# no signatures, no problem. Cheaper and faster, but weaker at multi-step
+# planning, which is most of what this project is about.
+THINKING_BUDGET = os.getenv("THINKING_BUDGET")
+
+EXTRA_BODY = {}
+if THINKING_BUDGET is not None:
+    EXTRA_BODY = {
+        "extra_body": {
+            "google": {"thinking_config": {"thinking_budget": int(THINKING_BUDGET)}}
+        }
+    }
+
 SYSTEM_PROMPT = """You are a travel planning assistant for Toronto.
 
 You have tools for geocoding, weather, and finding points of interest.
@@ -60,6 +83,7 @@ def run(user_message: str, verbose: bool = True) -> str:
             model=MODEL,
             messages=messages,
             tools=TOOL_SCHEMAS,
+            extra_body=EXTRA_BODY or None,
         )
         message = response.choices[0].message
 
@@ -69,23 +93,11 @@ def run(user_message: str, verbose: bool = True) -> str:
 
         # The assistant turn must go into history before the tool results,
         # or the next request will 400 on a dangling tool_call_id.
-        messages.append(
-            {
-                "role": "assistant",
-                "content": message.content,
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-                    for tc in message.tool_calls
-                ],
-            }
-        )
+        #
+        # model_dump() rather than a hand-built dict: it round-trips provider
+        # extras like Gemini's thought_signature, which a manual rebuild
+        # silently drops. See the THINKING_BUDGET note above.
+        messages.append(message.model_dump(exclude_none=True))
 
         for tool_call in message.tool_calls:
             name = tool_call.function.name
