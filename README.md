@@ -68,11 +68,17 @@ Each stage is roughly a sitting, and each one teaches exactly one thing.
 Tool calling, dispatch, feeding errors back to the model, a step cap.
 Read `agent.py` top to bottom before moving on.
 
-**Stage 2 — GTFS in SQLite**
-Download the TTC feed, load `stops`, `routes`, `trips`, `stop_times`,
-`calendar` into SQLite. Give the agent a `query_transit` tool. Expect to lose
-an hour to `calendar_dates.txt` — that's the exception table for holidays, and
-it's why your Sunday itinerary will be wrong until you handle it.
+**Stage 2 — GTFS in SQLite** ✅
+`python load_gtfs.py` pulls the current TTC feed and loads it into
+`transit.db`. The agent gets two new tools: `describe_transit_schema` and
+`query_transit` (read-only SELECT). It writes its own SQL, gets errors back as
+text, and retries — self-correction with a real feedback signal.
+
+**Stage 4 — evaluation** ✅ *(done early, out of order — and it should have been)*
+`python evals.py`. Six cases with ground truth computed from the database at
+run time, not hardcoded, so the suite survives the TTC's six-week republish.
+Includes a hallucination check (asks for fare data the feed doesn't contain)
+and a known-failing case (`calendar_dates` exceptions).
 
 **Stage 3 — structured output**
 Stop returning prose. Define an `Itinerary` Pydantic model (days → legs →
