@@ -42,6 +42,7 @@ import llm
 import providers
 import trace
 from llm import DailyQuotaExhausted, call_model
+from threadstate import ThreadLocalDict
 from tools import SCHEDULE_TOOLS, TOOL_FUNCTIONS
 
 MAX_STEPS = providers.MAX_STEPS
@@ -101,11 +102,18 @@ particulars are not, and they're the ones a reader will act on.
 
 For a journey between two places, do exactly this:
   1. geocode each place to get coordinates
-  2. plan_journey(origin_lat, origin_lon, dest_lat, dest_lon, after_time)
+  2. if the traveller avoids a mode, check_mode_feasibility on the destination
+  3. plan_journey(origin_lat, origin_lon, dest_lat, dest_lon, after_time)
 
-That's it. plan_journey searches nearby stops at both ends, finds a direct
-ride or computes a single-transfer option with a real interchange, and returns
-verified times for every leg. Two tool calls answer the whole question.
+plan_journey searches nearby stops at both ends, finds a direct ride or
+computes a single-transfer option with a real interchange, and returns
+verified times for every leg. Those few calls answer the whole question.
+
+If check_mode_feasibility says the trip is impossible without an avoided mode,
+SAY SO and stop. Do not find another way, and do not use a route you remember:
+routes close. Line 3 RT shut in 2023 and is not in this feed. An itinerary
+built on a line that no longer exists is worse than telling the traveller
+their preference conflicts with reality.
 
 Do NOT hand-pick stops, guess an interchange, or write journey SQL yourself.
 Every attempt at that produced empty results that were then misread as "no
@@ -169,7 +177,8 @@ filling the gap."""
 # Reset at the top of every run(). These flags are how callers tell a run that
 # finished from a run that actually established something — different
 # questions, and only the second one licenses trusting the answer.
-LAST_RUN = {
+def _fresh_run_state() -> dict:
+    return {
     "truncated": False,
     "steps": 0,
     "repeats": 0,
@@ -180,7 +189,12 @@ LAST_RUN = {
     "best_retrieval": 0.0, # best similarity seen across those searches
     "rewrote_query": False,# did it re-query after a weak result?
     "grounding": None,     # coverage report for the final answer
-}
+    }
+
+
+# Thread-local, because stage 9 runs agents concurrently. Kept as a
+# dict-shaped object so every existing LAST_RUN["..."] call site is unchanged.
+LAST_RUN = ThreadLocalDict(_fresh_run_state)
 
 # "Did query_transit return rows?" turned out to be the wrong question. A run
 # that only looked up `SELECT DISTINCT service_id FROM calendar` satisfies it

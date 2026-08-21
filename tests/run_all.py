@@ -2,12 +2,13 @@
 
     python tests/run_all.py
 
-Six suites:
+Seven suites:
     test_tools     tool logic + SQL against transit.db
     test_agent     loop mechanics with a scripted fake model
     test_grounding whether an answer's specifics trace to its sources
     test_constraints whether an itinerary is actually possible
     test_memory    what persists between sessions, and what must not
+    test_crew      decomposition, concurrent subagents, synthesis
     evals          --selftest, i.e. do the eval checkers themselves work
 
 Deliberately excluded: smoke_test.py (hits live APIs) and the eval suite
@@ -27,6 +28,7 @@ SUITES = [
     ("grounding", [sys.executable, str(HERE / "test_grounding.py")], HERE),
     ("constraints", [sys.executable, str(HERE / "test_constraints.py")], HERE),
     ("memory", [sys.executable, str(HERE / "test_memory.py")], HERE),
+    ("crew", [sys.executable, str(HERE / "test_crew.py")], HERE),
     ("eval checkers", [sys.executable, str(ROOT / "evals.py"), "--selftest"], ROOT),
 ]
 

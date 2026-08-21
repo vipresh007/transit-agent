@@ -130,6 +130,75 @@ def test_failover():
     cleaned = providers.sanitize(history)
     check("vendor extras stripped when not on gemini",
           "extra_content" in cleaned[0]["tool_calls"][0], False)
+
+    # Groq attaches a top-level `reasoning` string to assistant messages.
+    # Replaying that to Mistral on failover returned 422 extra_forbidden.
+    # We had a blacklist, met a second vendor extension, and broke a run —
+    # so sanitize now whitelists the spec instead of naming known offenders.
+    messy = [{
+        "role": "assistant", "content": None,
+        "reasoning": "groq's chain of thought",
+        "audio": None, "function_call": None, "refusal": None,
+        "tool_calls": [{"id": "1", "type": "function",
+                        "function": {"name": "geocode", "arguments": "{}"},
+                        "extra_content": {"google": {"thought_signature": "S"}}}],
+    }, {"role": "tool", "tool_call_id": "1", "content": "r", "junk": "x"}]
+
+    out = providers.sanitize(messy)
+    check("unknown assistant fields are dropped",
+          set(out[0]), {"role", "content", "tool_calls"})
+    check("unknown tool-message fields are dropped",
+          set(out[1]), {"role", "content", "tool_call_id"})
+    check("tool_calls keep only spec keys",
+          set(out[0]["tool_calls"][0]), {"id", "type", "function"})
+
+    # ...but Gemini REQUIRES its signature echoed back, so that one survives.
+    providers._active = next(i for i, p in enumerate(providers.AVAILABLE)
+                             if p["name"] == "gemini")
+    out = providers.sanitize(messy)
+    check("gemini still gets its thought_signature",
+          "extra_content" in out[0]["tool_calls"][0])
+    check("but not groq's reasoning", "reasoning" in out[0], False)
+    providers._active = 0
+
+
+def test_sanitize_follows_the_provider():
+    section("payload is sanitized for whoever actually receives it")
+
+    # sanitize() ran ONCE before the retry loop, so a mid-loop failover
+    # resent a Gemini-shaped payload to Mistral, which 422'd on
+    # thought_signature. The sanitizer was correct; it ran before the thing
+    # it depended on changed.
+    history = [{
+        "role": "assistant", "content": None, "reasoning": "groq cot",
+        "tool_calls": [{"id": "1", "type": "function",
+                        "function": {"name": "geocode", "arguments": "{}"},
+                        "extra_content": {"google": {"thought_signature": "S"}}}],
+    }]
+    seen = []
+
+    providers._active = 0
+    gem = MagicMock()
+    def gem_create(**kw):
+        seen.append(("gemini", kw["messages"]))
+        raise om.RateLimitError(DAILY)
+    gem.chat.completions.create = gem_create
+    providers._client = gem
+
+    groq = MagicMock()
+    def groq_create(**kw):
+        seen.append(("groq", kw["messages"]))
+        return OK
+    groq.chat.completions.create = groq_create
+
+    with patch.object(providers, "OpenAI", lambda **kw: groq), patch("time.sleep"):
+        llm.call_model(history, verbose=False)
+
+    check("two providers were tried", len(seen), 2)
+    check("gemini received its thought_signature",
+          "extra_content" in seen[0][1][0]["tool_calls"][0])
+    check("the fallback did NOT receive it",
+          "extra_content" in seen[1][1][0]["tool_calls"][0], False)
     providers._active = 0
 
 
@@ -313,7 +382,8 @@ def test_retrieval_telemetry():
 
 
 if __name__ == "__main__":
-    for fn in (test_retry_and_quota, test_failover, test_loop_guards,
+    for fn in (test_retry_and_quota, test_failover,
+               test_sanitize_follows_the_provider, test_loop_guards,
                test_verification_guards, test_result_clipping,
                test_grounding_pushback, test_retrieval_telemetry):
         fn()

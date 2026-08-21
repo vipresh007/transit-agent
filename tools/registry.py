@@ -18,6 +18,7 @@ from memory import (
     TOOL_SCHEMAS as MEMORY_SCHEMAS,
 )
 from .transit import (
+    check_mode_feasibility,
     describe_transit_schema,
     find_direct_trips,
     find_nearby_stops,
@@ -151,6 +152,31 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "check_mode_feasibility",
+            "description": (
+                "Check whether a destination can be reached WITHOUT the modes "
+                "the traveller avoids. Call this right after geocoding, before "
+                "planning, whenever they have said to avoid a mode. If it says "
+                "the trip is impossible without that mode, tell them — do not "
+                "search for an alternative and do not use a route from memory."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "lat": {"type": "number"},
+                    "lon": {"type": "number"},
+                    "avoid_modes": {
+                        "type": "string",
+                        "description": "Comma-separated: bus, streetcar, subway",
+                    },
+                },
+                "required": ["lat", "lon", "avoid_modes"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "plan_journey",
             "description": (
                 "Plan a real journey between two coordinates. Searches nearby "
@@ -272,6 +298,7 @@ TOOL_FUNCTIONS = {
     "find_direct_trips": find_direct_trips,
     "plan_journey": plan_journey,
     "search_guides": search_guides,
+    "check_mode_feasibility": check_mode_feasibility,
     **MEMORY_FUNCTIONS,
 }
 

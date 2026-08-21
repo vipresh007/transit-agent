@@ -206,6 +206,32 @@ def test_route_label_resolution():
           [])
 
 
+def test_infeasibility_preflight():
+    section("constraints that cannot be satisfied at all")
+    if not HAS_DB:
+        print("  (skipped: transit.db not built)")
+        return
+
+    # Scarborough Town Centre is served by seventeen bus routes and nothing
+    # else — Line 3 RT closed in 2023 and isn't in the feed. Asked to avoid
+    # buses, the model produced Line 3 from stale training knowledge and wrote
+    # a confident 88-minute itinerary. 34 requests to reach a fabrication.
+    warnings = C.preflight(C.Preferences(avoid_modes=["bus"]),
+                           (43.7761341, -79.2584376))
+    check("a bus-only destination is flagged up front", len(warnings), 1)
+    check("the warning says the trip is impossible",
+          "CANNOT be planned" in warnings[0])
+    check("and warns against using a remembered line",
+          "Line 3" in warnings[0])
+
+    # Somewhere streetcars reach: no conflict.
+    check("a reachable destination raises nothing",
+          C.preflight(C.Preferences(avoid_modes=["bus"]),
+                      (43.6503278, -79.3592001)), [])
+    check("no avoid preference means no check",
+          C.preflight(C.Preferences(), (43.7761341, -79.2584376)), [])
+
+
 def test_reporting():
     section("violation messages")
 
@@ -222,7 +248,8 @@ def test_reporting():
 
 if __name__ == "__main__":
     for fn in (test_transfers, test_preferences, test_against_schedule,
-               test_route_label_resolution, test_reporting):
+               test_route_label_resolution, test_infeasibility_preflight,
+               test_reporting):
         fn()
     from _harness import PASSED
     print(f"\n{PASSED['n']} checks passed")

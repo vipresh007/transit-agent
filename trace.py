@@ -13,8 +13,12 @@ import os
 import time
 from pathlib import Path
 
+from threadstate import ThreadLocalList
+
 TRACE_DIR = Path(os.getenv("TRACE_DIR", "traces"))
-EVENTS: list[dict] = []
+# Thread-local: stage 9 runs several agents at once, and a shared list
+# would interleave their events into one unusable trace.
+EVENTS = ThreadLocalList()
 
 
 def reset() -> None:
@@ -48,7 +52,7 @@ def write(
         "flags": {
             k: (sorted(v) if isinstance(v, set) else v) for k, v in flags.items()
         },
-        "events": EVENTS,
+        "events": EVENTS.snapshot(),
         "answer": answer,
         **(extra or {}),
     }

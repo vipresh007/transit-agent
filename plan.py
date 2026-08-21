@@ -49,6 +49,9 @@ Rules:
 - Times must be GTFS format "HH:MM:SS". After midnight use 24+ notation:
   1:23am on the next day is "25:23:00", never "1:23 AM" and never "01:23:00".
 - Every non-walk leg needs a route.
+- If NO journey satisfies the constraints, set feasible=false, leave legs
+  EMPTY, and put the reason in infeasible_reason. Do NOT invent a placeholder
+  leg. "This cannot be done, here is why" is a valid and useful answer.
 - Legs must be in chronological order and must not overlap.
 - Put anything you could not verify into caveats. An empty caveats list is a
   claim that everything is confirmed — only make it if that's true.
@@ -306,7 +309,8 @@ def main() -> None:
     # again, which resets the trace.
     sources = [e["result"] for e in agent.trace.EVENTS if e["kind"] == "tool_call"]
 
-    violations = constraints.verify(itinerary, prefs)
+    violations = [] if not itinerary.feasible else constraints.verify(
+        itinerary, prefs)
     if violations:
         itinerary, violations = repair(itinerary, violations, prefs,
                                        collected_sources=sources)

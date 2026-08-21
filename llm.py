@@ -103,22 +103,33 @@ def _backoff(exc, attempt: int, attempts: int, delay: float, verbose: bool) -> N
 
 def call_model(messages, attempts: int = 5, verbose: bool = True, use_tools: bool = True):
     """Send a request, surviving the ways free tiers fail."""
-    sent = providers.sanitize(messages)
-
-    if cache.ENABLED:
-        key = cache.key_for(providers.model(), sent, use_tools, providers.TEMPERATURE)
-        hit = cache.read(key)
-        if hit is not None:
-            cache.STATS["hits"] += 1
-            _log(f". cache hit ({key[:8]})", verbose)
-            return hit
-        cache.STATS["misses"] += 1
-
     delay = 2.0
     last_exc: Exception | None = None
     waits = 0
+    counted_miss = False
 
     for attempt in range(attempts):
+        # Sanitize and key INSIDE the loop. Both depend on which provider is
+        # active, and a mid-loop failover changes that. Computing them once up
+        # front resent a Gemini-sanitized payload — thought_signature and all —
+        # to Mistral, which 422'd on a field it has never heard of. The
+        # sanitizer was right; it just ran before the thing it depended on
+        # changed.
+        sent = providers.sanitize(messages)
+        key = None
+
+        if cache.ENABLED:
+            key = cache.key_for(providers.model(), sent, use_tools,
+                                providers.TEMPERATURE)
+            hit = cache.read(key)
+            if hit is not None:
+                cache.STATS["hits"] += 1
+                _log(f". cache hit ({key[:8]})", verbose)
+                return hit
+            if not counted_miss:
+                cache.STATS["misses"] += 1
+                counted_miss = True
+
         try:
             providers.throttle()
             USAGE["n"] += 1
@@ -135,7 +146,7 @@ def call_model(messages, attempts: int = 5, verbose: bool = True, use_tools: boo
             if usage:
                 USAGE["prompt_tokens"] += usage.prompt_tokens or 0
                 USAGE["completion_tokens"] += usage.completion_tokens or 0
-            if cache.ENABLED:
+            if cache.ENABLED and key:
                 cache.write(key, response)
             return response
 

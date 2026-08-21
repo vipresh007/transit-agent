@@ -349,3 +349,28 @@ def query_transit(sql: str) -> str:
     if not rows:
         return "Query returned no rows."
     return json.dumps([dict(zip(columns, row)) for row in rows])
+
+
+def check_mode_feasibility(lat: float, lon: float, avoid_modes: str) -> str:
+    """Can this place be reached without the modes the traveller avoids?
+
+    Asked for Scarborough Town Centre with "avoid bus", the model produced
+    Line 3 RT — a rail line that closed in 2023 and is not in the feed —
+    rather than report that the trip is bus-only. One query up front turns an
+    impossible request into an honest answer instead of 34 requests spent
+    hunting for a route that cannot exist.
+    """
+    import constraints
+
+    modes = [m.strip() for m in (avoid_modes or "").split(",") if m.strip()]
+    if not modes:
+        return "No modes to avoid; nothing to check."
+
+    warnings = constraints.preflight(
+        constraints.Preferences(avoid_modes=modes), (lat, lon)
+    )
+    if warnings:
+        return warnings[0]
+    return (
+        f"Reachable without {', '.join(modes)}. Continue planning normally."
+    )

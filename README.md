@@ -71,6 +71,8 @@ response cache usable, since the model name is part of the cache key).
 | `constraints.py` | Is the itinerary possible? Checked against the DB. |
 | `grounding.py` | Do the answer's specifics trace to retrieved text? |
 | `memory.py` | Standing preferences that survive between sessions. |
+| `crew.py` | Plan → parallel subagents → synthesise. |
+| `threadstate.py` | Per-thread run state, so subagents don't collide. |
 | `evals.py` | Test suite, plus `--selftest` for the checkers. |
 
 Scripts: `load_gtfs.py` (build the transit DB), `load_guides.py` (build the
@@ -213,7 +215,24 @@ escape without editing a database.
 Persist preferences across sessions. "No early mornings", "vegetarian",
 "I'd rather walk than take a bus."
 
-**Stage 9 — multi-agent**
+**Stage 9 — multi-agent** ✅
+`python crew.py "plan me a Saturday in Toronto"`. A planner decomposes the
+question into independent subtasks, each runs as its own agent in its own
+thread with a fresh context, and a synthesiser merges them.
+
+**Context isolation is the point; parallelism is a bonus.** A single agent
+planning a whole day accumulates every tool result from every part of it, and
+by the afternoon its context is mostly morning.
+
+**It is not a general upgrade.** Four subtasks cost roughly 26 requests where
+one agent might use 8. It only pays when the parts are genuinely independent —
+"where should I eat, and how do I get there from the museum?" is sequential,
+and the planner is told to merge rather than fake a split.
+
+This stage forced `threadstate.py`. `LAST_RUN` and `trace.EVENTS` were module
+globals, so two subagents wrote into the same dict and list — no crash, just a
+trace mixing conversations and flags belonging to neither. Global mutable
+state is fine until you need two of something.
 One researcher per day of the trip running in parallel, a synthesizer merging
 them into one itinerary. Now compare hand-rolled vs LangGraph and you'll have
 earned an opinion.

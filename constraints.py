@@ -313,6 +313,64 @@ def _check_preferences(out, itinerary, legs, prefs: Preferences) -> None:
             ))
 
 
+def preflight(prefs: Preferences, *coords, radius_m: int = 900) -> list[str]:
+    """Warn BEFORE planning if a preference makes the trip impossible.
+
+    A real run asked for Kensington Market -> Scarborough Town Centre with a
+    standing "avoid bus" preference. Scarborough Centre is served by seventeen
+    bus routes and nothing else — Line 3 RT closed in 2023 and isn't in the
+    feed. Rather than report the conflict, the model produced Line 3 from
+    stale training knowledge and wrote a confident 88-minute itinerary.
+
+    Verification caught it afterwards, but only after ~34 requests. Checking
+    up front costs one SQL query and lets the agent say "this needs a bus"
+    instead of hunting for a route that cannot exist.
+    """
+    if not prefs.avoid_modes or not os.path.exists(DB_PATH):
+        return []
+
+    type_of = {"0": "streetcar", "1": "subway", "3": "bus"}
+    avoided = {m.strip().lower() for m in prefs.avoid_modes}
+    warnings = []
+
+    conn = _conn()
+    try:
+        for lat, lon in coords:
+            dlat = radius_m / 111_320
+            dlon = radius_m / (111_320 * 0.723)
+            rows = conn.execute(
+                """
+                SELECT DISTINCT r.route_short_name, r.route_type
+                FROM stops s
+                JOIN stop_times st ON st.stop_id = s.stop_id
+                JOIN trips t       ON t.trip_id  = st.trip_id
+                JOIN routes r      ON r.route_id = t.route_id
+                WHERE CAST(s.stop_lat AS REAL) BETWEEN ? AND ?
+                  AND CAST(s.stop_lon AS REAL) BETWEEN ? AND ?
+                """,
+                (lat - dlat, lat + dlat, lon - dlon, lon + dlon),
+            ).fetchall()
+            if not rows:
+                continue
+
+            modes = {type_of.get(rt, rt) for _name, rt in rows}
+            usable = modes - avoided
+            if not usable:
+                warnings.append(
+                    f"Every route within {radius_m}m of ({lat:.4f}, {lon:.4f}) "
+                    f"is {'/'.join(sorted(modes))}, which the traveller asked "
+                    f"to avoid. This journey CANNOT be planned without "
+                    f"{'/'.join(sorted(modes))}. Say so plainly and let them "
+                    f"decide — do not look for another route, and do not use "
+                    f"a rail line from memory: Line 3 RT closed in 2023 and "
+                    f"is not in this feed."
+                )
+    finally:
+        conn.close()
+
+    return warnings
+
+
 def report(violations: list[Violation]) -> str:
     if not violations:
         return "No constraint violations."

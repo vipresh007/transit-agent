@@ -93,15 +93,51 @@ class Leg(BaseModel):
 
 
 class Itinerary(BaseModel):
-    """A complete journey, plus what the agent could not establish."""
+    """A journey, OR a reasoned statement that no journey exists.
+
+    `legs` was min_length=1, which made "this trip is impossible" impossible
+    to express. Asked for a bus-free route to a bus-only destination, the
+    model emitted a zero-minute walk from Scarborough Town Centre to itself
+    and wrote in the caveats: "the single walk leg is a placeholder to satisfy
+    schema requirements."
+
+    It told us plainly that the schema forced it to fabricate. A schema that
+    can only represent success will get success-shaped output regardless of
+    what happened — so "no route" is now a first-class outcome.
+    """
 
     summary: str = Field(description="One sentence describing the trip")
-    legs: list[Leg] = Field(min_length=1)
+    feasible: bool = Field(
+        True,
+        description="False if no journey satisfies the constraints. Then legs "
+        "MUST be empty and infeasible_reason MUST explain why.",
+    )
+    infeasible_reason: str | None = Field(
+        None, description="Why no journey exists. Required when feasible=False."
+    )
+    legs: list[Leg] = Field(default_factory=list)
     caveats: list[str] = Field(
         default_factory=list,
         description="Anything unverified: holiday service, real-time delays, "
         "assumptions made. Empty list if genuinely none.",
     )
+
+    @model_validator(mode="after")
+    def feasible_or_explained(self) -> Itinerary:
+        if self.feasible and not self.legs:
+            raise ValueError(
+                "a feasible itinerary needs at least one leg; if no journey "
+                "exists set feasible=false and give infeasible_reason"
+            )
+        if not self.feasible:
+            if self.legs:
+                raise ValueError(
+                    "an infeasible itinerary must have NO legs — do not invent "
+                    "a placeholder leg to satisfy the schema"
+                )
+            if not (self.infeasible_reason or "").strip():
+                raise ValueError("feasible=false requires infeasible_reason")
+        return self
 
     @model_validator(mode="after")
     def legs_are_chronological(self) -> Itinerary:
@@ -116,6 +152,8 @@ class Itinerary(BaseModel):
 
     @property
     def total_min(self) -> int:
+        if not self.legs:
+            return 0
         return (to_seconds(self.legs[-1].arrive) - to_seconds(self.legs[0].depart)) // 60
 
     @property
@@ -152,6 +190,13 @@ class Itinerary(BaseModel):
         return risky
 
     def render(self) -> str:
+        if not self.feasible:
+            lines = [self.summary, "",
+                     f"  NO JOURNEY FOUND: {self.infeasible_reason}"]
+            if self.caveats:
+                lines += ["", "  Details:"] + [f"    - {c}" for c in self.caveats]
+            return "\n".join(lines)
+
         lines = [self.summary, ""]
         for leg in self.legs:
             lines.append(f"  {leg}")

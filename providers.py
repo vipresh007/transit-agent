@@ -115,25 +115,56 @@ def switch(on_switch=None) -> bool:
     return True
 
 
+# The OpenAI chat-completions spec, and nothing else. Providers bolt their own
+# fields onto assistant messages — Gemini adds thought_signature inside
+# tool_calls, Groq adds a top-level `reasoning` string — and replaying one
+# vendor's history to another gets a 422 for a field the second has never
+# heard of.
+#
+# WHITELIST, not blacklist. Blacklisting means knowing every vendor extension
+# in advance; we shipped a blacklist, met a second extension, and broke a run
+# on failover. Keeping only spec fields is correct for extensions that don't
+# exist yet.
+ALLOWED_BY_ROLE = {
+    "system": {"role", "content", "name"},
+    "user": {"role", "content", "name"},
+    "assistant": {"role", "content", "tool_calls", "name"},
+    "tool": {"role", "content", "tool_call_id"},
+}
+ALLOWED_TOOL_CALL = {"id", "type", "function"}
+
+
 def sanitize(messages: list) -> list:
-    """Strip provider-specific extras before sending history elsewhere.
+    """Strip provider-specific extras before sending history to a provider.
 
-    Gemini attaches thought_signature to tool calls. Groq has never seen that
-    field and may reject it. Failing over mid-conversation means handing one
-    vendor's history to another, so scrub anything vendor-specific first.
+    Gemini is the exception: its thought_signature must be echoed BACK to
+    Gemini or it rejects the next turn. So we keep extras when talking to
+    Gemini and drop them for everyone else.
     """
-    if is_gemini():
-        return messages
-
+    keep_gemini_extras = is_gemini()
     cleaned = []
-    for m in messages:
-        if m.get("role") == "assistant" and m.get("tool_calls"):
-            m = dict(m)
-            m["tool_calls"] = [
-                {k: v for k, v in tc.items() if k != "extra_content"}
-                for tc in m["tool_calls"]
-            ]
-        cleaned.append(m)
+
+    for message in messages:
+        role = message.get("role", "user")
+        allowed = ALLOWED_BY_ROLE.get(role, {"role", "content"})
+        out = {k: v for k, v in message.items() if k in allowed}
+
+        if out.get("tool_calls"):
+            calls = []
+            for call in out["tool_calls"]:
+                trimmed = {k: v for k, v in call.items() if k in ALLOWED_TOOL_CALL}
+                if keep_gemini_extras and "extra_content" in call:
+                    trimmed["extra_content"] = call["extra_content"]
+                calls.append(trimmed)
+            out["tool_calls"] = calls
+
+        # An assistant turn with tool_calls may legitimately have null content,
+        # but some providers reject a missing key outright.
+        if role == "assistant" and "content" not in out:
+            out["content"] = None
+
+        cleaned.append(out)
+
     return cleaned
 
 
