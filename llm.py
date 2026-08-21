@@ -15,6 +15,7 @@ costs either quota (retrying a daily cap) or a whole run (giving up on a
 five-minute window).
 """
 
+import os
 import random
 import re
 import sys
@@ -164,14 +165,28 @@ def call_model(messages, attempts: int = 5, verbose: bool = True, use_tools: boo
                     _log(f"~ {spent} daily quota exhausted — failing over to "
                          f"{providers.describe()}", verbose)
                     continue
+                # Say WHY there's no fallback. "No other provider is
+                # configured" was actively misleading when the real cause was
+                # PROVIDER= pinning one and filtering the rest out — the user
+                # had three other keys sitting in .env.
+                pinned = os.getenv("PROVIDER")
+                if pinned:
+                    reason = (
+                        f"PROVIDER={pinned} is set in .env, which pins this "
+                        f"provider and disables failover.\n"
+                        f"Comment it out to fall through to the rest of the "
+                        f"chain, or point it at another provider."
+                    )
+                else:
+                    reason = (
+                        "No other provider has a key configured.\n"
+                        "  - Add GROQ_API_KEY / MISTRAL_API_KEY / "
+                        "CEREBRAS_API_KEY to .env\n"
+                        "  - or set OLLAMA_ENABLED=1 for unlimited local"
+                    )
                 raise DailyQuotaExhausted(
-                    f"Daily quota exhausted for {spent}, and no other provider "
-                    f"is configured.\nUsed {USAGE['n']} requests this run.\n\n"
-                    "Options:\n"
-                    "  1. Add another key to .env (groq, mistral, cerebras)\n"
-                    "  2. `python list_models.py` and pick a roomier model\n"
-                    "  3. Set OLLAMA_ENABLED=1 for unlimited local\n"
-                    "  4. Wait for the reset"
+                    f"Daily quota exhausted for {spent}.\n"
+                    f"Used {USAGE['n']} requests this run.\n\n{reason}"
                 ) from exc
 
             _backoff(exc, attempt, attempts, max(delay, 15.0), verbose)

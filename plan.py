@@ -30,6 +30,7 @@ from pydantic import ValidationError
 # this footer reported "gemini" after failing over to Groq. Functions can't go
 # stale, so that class of bug is now structurally impossible.
 import agent
+import constraints
 import grounding
 import llm
 import providers
@@ -158,15 +159,107 @@ def structure(
     raise ValueError(f"Could not produce a valid Itinerary: {last_error}")
 
 
+REPAIR_PROMPT = """\
+The itinerary below is scheduled-valid in shape but violates real-world
+constraints, checked against the TTC database:
+
+{itinerary}
+
+VIOLATIONS
+{violations}
+
+Fix them using your tools. Each violation says what to change — follow it.
+Specifically:
+- For a tight transfer or an unscheduled departure, call plan_journey or
+  find_direct_trips again and use a departure that actually exists. Do not
+  adjust a time by hand; a plausible-looking time you invented is exactly
+  what created this problem.
+- For a walk that's too fast, allow the stated duration and shift later legs.
+- If a constraint genuinely cannot be satisfied (no service that late, no
+  route without a transfer), say so plainly instead of producing something
+  that looks compliant.
+
+Report the corrected journey as plain notes, with real retrieved times."""
+
+
+def repair(itinerary, violations, prefs, rounds: int = 2, verbose: bool = True,
+           collected_sources: list | None = None):
+    """Hand violations back to the agent and re-verify. Bounded rounds.
+
+    The repair goes through the full agent loop WITH TOOLS, not through the
+    structuring pass. Fixing "only 1 minute to make the 504" requires looking
+    up a later 504 — no amount of reformatting the existing JSON will do it.
+    A repair loop that can't gather new information can only produce
+    plausible-looking edits, which is how you get an itinerary that passes
+    validation by having its numbers quietly changed.
+    """
+    for attempt in range(rounds):
+        if verbose:
+            print(f"\n  [repair {attempt + 1}/{rounds}] "
+                  f"{len(violations)} violation(s)", file=sys.stderr)
+            for v in violations:
+                print(f"      {v}", file=sys.stderr)
+
+        notes = run(
+            REPAIR_PROMPT.format(
+                itinerary=itinerary.render(),
+                violations="\n".join(f"- {v}" for v in violations),
+            ),
+            verbose=verbose,
+            require_times=True,
+        )
+        # run() resets trace.EVENTS, so harvest this round's tool results
+        # before the next call wipes them. Without this the grounding check
+        # ends up comparing the final answer against only the last repair's
+        # sources, and reports genuine facts from the research phase as
+        # invented.
+        if collected_sources is not None:
+            collected_sources.extend(
+                e["result"] for e in agent.trace.EVENTS if e["kind"] == "tool_call"
+            )
+        try:
+            fixed = structure(notes, verbose=verbose)
+        except ValueError as exc:
+            if verbose:
+                print(f"  [repair] could not restructure: {exc}", file=sys.stderr)
+            return itinerary, violations
+
+        remaining = constraints.verify(fixed, prefs)
+        # Only accept a repair that actually improves things. A "fix" that
+        # trades two violations for three is a regression, and without this
+        # check the loop would happily accept it and call itself done.
+        if len(remaining) < len(violations):
+            itinerary, violations = fixed, remaining
+            if not violations:
+                return itinerary, violations
+        else:
+            if verbose:
+                print(f"  [repair] no improvement "
+                      f"({len(violations)} -> {len(remaining)}), keeping original",
+                      file=sys.stderr)
+            return itinerary, violations
+
+    return itinerary, violations
+
+
 def main() -> None:
     question = " ".join(sys.argv[1:]) or (
         "How do I get from Kensington Market to the Distillery District "
         "on a weekday morning?"
     )
+    prefs = constraints.Preferences.from_env()
 
-    print(f"Researching: {question}\n", file=sys.stderr)
-    research = run(question + RESEARCH_SUFFIX, require_times=True,
-                   require_grounding=True)
+    print(f"Researching: {question}", file=sys.stderr)
+    print(f"Constraints: {prefs.describe()}\n", file=sys.stderr)
+
+    # State the constraints up front as well as checking them afterwards.
+    # Verification alone would work, but every violation costs a repair round,
+    # and a repair round costs a full agent run.
+    research = run(
+        question + RESEARCH_SUFFIX
+        + f"\n\nThe traveller's constraints: {prefs.describe()}.",
+        require_times=True, require_grounding=True,
+    )
 
     truncated = agent.LAST_RUN["truncated"]
     # The load-bearing check: did a real CLOCK TIME ever come back from the
@@ -199,13 +292,28 @@ def main() -> None:
         print(research)
         sys.exit(1)
 
+    # Constraint verification against the real schedule. Pydantic checked the
+    # SHAPE of this itinerary; this checks whether it could actually happen.
+    # Harvest the research phase's tool results now: repair rounds call run()
+    # again, which resets the trace.
+    sources = [e["result"] for e in agent.trace.EVENTS if e["kind"] == "tool_call"]
+
+    violations = constraints.verify(itinerary, prefs)
+    if violations:
+        itinerary, violations = repair(itinerary, violations, prefs,
+                                       collected_sources=sources)
+
     print(itinerary.render())
+
+    if violations:
+        print(f"\n  [!] {constraints.report(violations)}", file=sys.stderr)
+    else:
+        print("\n  [ok] all constraints satisfied", file=sys.stderr)
 
     # Grounding: do the answer's specifics trace to what the tools returned?
     # RAG improves the material a model works from; it does not stop it
     # embellishing. This catches invented specifics — the failure mode that
     # actually matters, since a wrong street name or price is actionable.
-    sources = [e["result"] for e in agent.trace.EVENTS if e["kind"] == "tool_call"]
     ground = grounding.check(itinerary.render(), sources)
     if ground["unsupported"]:
         print(f"\n  [grounding] {grounding.summary(ground)}", file=sys.stderr)
@@ -219,6 +327,10 @@ def main() -> None:
             "connection_gaps_min": itinerary.connection_gaps(),
             "phase": "plan",
             "grounding": ground,
+            "constraints": {
+                "preferences": prefs.describe(),
+                "violations": [str(v) for v in violations],
+            },
         },
     )
     flags = []
@@ -238,4 +350,19 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        import traceback
+        # A crash is precisely when the trace is most useful, and precisely
+        # when the happy-path write at the end of main() never runs.
+        try:
+            path = agent.write_trace(
+                " ".join(sys.argv[1:]) or "(default question)",
+                answer="",
+                extra={"phase": "crashed", "traceback": traceback.format_exc()},
+            )
+            print(f"\n[crash trace: {path}]", file=sys.stderr)
+        except Exception:
+            pass
+        raise

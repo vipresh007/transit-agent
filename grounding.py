@@ -37,9 +37,21 @@ STOPWORDS = {
     "note", "tip", "step", "total", "walk", "take", "get", "see", "eat",
     "monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
     "sunday", "morning", "afternoon", "evening", "night", "today",
-    # Table headers and itinerary furniture, not facts.
-    "departure", "arrival", "mode", "route", "leg", "time", "times",
+    # Document structure and domain-generic vocabulary. A phrase made up
+    # ENTIRELY of these is the model's own formatting, not a claim about the
+    # world: "Journey Overview", "Scheduled Departure", "Interchange Walk".
+    # Missing these, the checker flagged ten markdown headings as invented
+    # facts, and the agent responded by deleting real content to comply — a
+    # false-positive guard actively made the answer worse.
+    "departure", "arrival", "mode", "route", "leg", "legs", "time", "times",
     "summary", "caveats", "atmosphere", "food", "getting", "total",
+    "journey", "overview", "routing", "notes", "recommended", "option",
+    "options", "available", "origin", "destination", "scheduled", "estimated",
+    "interchange", "transfer", "next", "first", "last", "final", "start",
+    "streetcar", "subway", "bus", "train", "station", "stop", "stops",
+    "line", "service", "platform", "direction", "duration", "distance",
+    "northbound", "southbound", "eastbound", "westbound", "inbound",
+    "plan", "steps", "details", "info", "information", "overall",
     "toronto",  # in every chunk; matching it proves nothing
 }
 
@@ -86,9 +98,24 @@ def normalize(text: str) -> str:
 SENTENCE_START = re.compile(r"(?:^|[.!?:]\s+|\n\s*|[|#>*_\-]+\s*)$")
 
 
+# Markdown headings and bold-only lines are document structure. Enumerating
+# their vocabulary ("Journey Overview", "Alternative Journey Option",
+# "Slightly Later Departure") is unbounded — every answer invents new ones.
+# Removing the STRUCTURE is a rule; listing the words is whack-a-mole.
+HEADING_LINE = re.compile(r"^\s*(?:#{1,6}\s+.*|\*\*[^*]+\*\*:?\s*)$", re.M)
+TABLE_DIVIDER = re.compile(r"^\s*\|[\s|:-]+\|\s*$", re.M)
+
+
+def strip_formatting(text: str) -> str:
+    """Drop headings and table scaffolding, keep prose and data rows."""
+    text = HEADING_LINE.sub("", text)
+    text = TABLE_DIVIDER.sub("", text)
+    return text
+
+
 def claims(text: str) -> list[str]:
     """Claim-like tokens worth checking against a source."""
-    text = normalize(text)
+    text = strip_formatting(normalize(text))
     found = []
 
     for m in PROPER_NOUN.finditer(text):
@@ -137,7 +164,11 @@ def check(answer: str, sources: list[str]) -> dict:
         # or if every word does — guides may say "Kensington" and "Market"
         # separately, and calling that invented would be a false alarm.
         whole = low in haystack
-        parts = all(w in haystack for w in low.split()) if " " in low else whole
+        # Only the DISTINCTIVE words need grounding. "Spadina Streetcar" is
+        # supported by a source mentioning Spadina — demanding the corpus also
+        # contain the word "streetcar" flags a true statement as invented.
+        distinctive = [w for w in low.split() if w not in STOPWORDS]
+        parts = bool(distinctive) and all(w in haystack for w in distinctive)
         (supported if (whole or parts) else unsupported).append(claim)
 
     total = len(supported) + len(unsupported)

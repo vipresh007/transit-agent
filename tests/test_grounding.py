@@ -72,6 +72,39 @@ def test_false_positive_guards():
     check("multi-word names match on their parts", r["unsupported"], [])
 
 
+def test_markdown_is_not_a_claim():
+    section("document structure is not a factual claim")
+
+    # A real run flagged ten markdown headings as invented facts. The agent
+    # complied by DELETING content — including the walking legs of an
+    # itinerary — to satisfy a complaint about its own formatting. A
+    # false-positive guard made a correct answer unusable.
+    formatted = """## Journey Overview
+**Recommended Journey Option**
+
+| Origin Stop | Scheduled Departure | Interchange Walk |
+|---|---|---|
+| Spadina Ave at Nassau St | 09:01 | 2 min |
+
+Take the **Spadina Streetcar** south, then the King Streetcar east."""
+    r = grounding.check(formatted, SOURCE + [
+        '{"from":"Spadina Ave at Nassau St","depart":"09:01","route":"510"}'])
+    check("headings aren't claims", "Journey Overview" not in r["unsupported"])
+    check("table labels aren't claims",
+          "Scheduled Departure" not in r["unsupported"])
+    check("bold-only lines aren't claims",
+          "Recommended Journey Option" not in r["unsupported"])
+    # "Spadina Streetcar" is supported by a source naming Spadina; demanding
+    # the word "streetcar" too would flag a true statement.
+    check("generic words don't need grounding",
+          "Spadina Streetcar" not in r["unsupported"])
+
+    # ...but a real invented venue inside formatted text is still caught.
+    r = grounding.check(formatted + "\n\nStop at Casa Loma on the way.", SOURCE)
+    check("a genuine invention survives the filter",
+          "Casa Loma" in r["unsupported"])
+
+
 def test_derived_values():
     section("derived and rounded numbers")
 
@@ -98,7 +131,7 @@ def test_edges():
 
 if __name__ == "__main__":
     for fn in (test_supported_and_invented, test_false_positive_guards,
-               test_derived_values, test_edges):
+               test_markdown_is_not_a_claim, test_derived_values, test_edges):
         fn()
     from _harness import PASSED
     print(f"\n{PASSED['n']} checks passed")

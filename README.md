@@ -68,6 +68,8 @@ response cache usable, since the model name is part of the cache key).
 | `tools/registry.py` | Tool schemas + dispatch table. |
 | `schemas.py` | The typed `Itinerary` and its validators. |
 | `plan.py` | Two-phase research → structured itinerary. |
+| `constraints.py` | Is the itinerary possible? Checked against the DB. |
+| `grounding.py` | Do the answer's specifics trace to retrieved text? |
 | `evals.py` | Test suite, plus `--selftest` for the checkers. |
 
 Scripts: `load_gtfs.py` (build the transit DB), `load_guides.py` (build the
@@ -178,9 +180,20 @@ of the venues above are listed in the Wikivoyage guides, so you can trust the
 opening-hour details". Inventing venues is bad; asserting a source for the
 invention is worse, and it's why `PROVENANCE_CLAIM` exists.
 
-**Stage 7 — self-correction & replanning**
-Feed it constraint violations from stage 4 and make it fix its own itinerary.
-Closed on Mondays, 4-minute transfer that needs 12, no service after 01:30.
+**Stage 7 — replanning against real constraints** ✅
+`constraints.py` verifies an itinerary against the schedule and the
+traveller's preferences: does that departure exist, is one minute enough to
+change vehicles, can a person walk 1km in 2 minutes, does the route run today.
+Violations go back to the agent WITH TOOLS (`repair()` in `plan.py`), because
+fixing "only 1 min to make the 504" needs a new lookup, not a reworded JSON.
+
+The repair loop only accepts a fix that reduces the violation count — without
+that, a "repair" trading two problems for three passes as progress.
+
+Preferences come from `.env`: `PREF_EARLIEST`, `PREF_LATEST`,
+`PREF_MIN_TRANSFER`, `PREF_MAX_TRANSFERS`, `PREF_AVOID`. They're stated in the
+prompt *and* checked afterwards — stating them avoids repair rounds, checking
+them catches the times stating didn't work.
 
 **Stage 8 — memory**
 Persist preferences across sessions. "No early mornings", "vegetarian",
