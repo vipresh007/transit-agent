@@ -70,6 +70,7 @@ response cache usable, since the model name is part of the cache key).
 | `plan.py` | Two-phase research → structured itinerary. |
 | `constraints.py` | Is the itinerary possible? Checked against the DB. |
 | `grounding.py` | Do the answer's specifics trace to retrieved text? |
+| `memory.py` | Standing preferences that survive between sessions. |
 | `evals.py` | Test suite, plus `--selftest` for the checkers. |
 
 Scripts: `load_gtfs.py` (build the transit DB), `load_guides.py` (build the
@@ -195,7 +196,20 @@ Preferences come from `.env`: `PREF_EARLIEST`, `PREF_LATEST`,
 prompt *and* checked afterwards — stating them avoids repair rounds, checking
 them catches the times stating didn't work.
 
-**Stage 8 — memory**
+**Stage 8 — memory** ✅
+`memory.py` stores standing preferences in `memory.db` and merges them into
+`constraints.Preferences` at plan time, so a remembered "avoid buses" becomes
+an *enforced* constraint rather than more prompt text.
+
+The load-bearing design choice is `scope`, and it's a required field:
+`standing` persists, `trip` explicitly does not. "I'd rather walk than take a
+bus" is durable; "I need to be there by 3pm" is not, and saving it means every
+future journey silently inherits a 3pm deadline that nothing in the next
+conversation explains. `remember(scope='trip')` refuses, loudly, and says why.
+
+Precedence: environment and CLI beat memory. What the traveller says now must
+override what they said last week, or stored memory becomes impossible to
+escape without editing a database.
 Persist preferences across sessions. "No early mornings", "vegetarian",
 "I'd rather walk than take a bus."
 

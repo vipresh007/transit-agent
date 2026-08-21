@@ -111,6 +111,12 @@ def resolve_route(conn, label: str) -> str | None:
     demands the exact internal identifier will keep firing on correct answers
     written in human vocabulary, and every false positive costs a full agent
     run. Resolve the label instead of rejecting it.
+
+    Deliberately permissive: "510 Bloor" resolves to 510 even though 510 is
+    Spadina. This check only catches invented routes like "999"; whether the
+    route serves that stop at that time is _departure_is_scheduled's job, and
+    it validates route + stop + time together. Two loose overlapping checks
+    beat one strict check that fires on correct answers.
     """
     label = (label or "").strip()
     if not label:
@@ -147,13 +153,6 @@ def resolve_route(conn, label: str) -> str | None:
         (label, label, label),
     ).fetchone()
     return row[0] if row else None
-
-    # Note on permissiveness: "510 Bloor" resolves to 510 even though 510 is
-    # Spadina. That's deliberate. This check exists to catch invented routes
-    # like "999"; whether the route actually serves the stop at that time is
-    # _departure_is_scheduled's job, and it validates route + stop + time
-    # together. Two loose checks that overlap beat one strict check that
-    # fires on correct answers.
 
 
 def _departure_is_scheduled(conn, route: str, stop_name: str, depart: str,

@@ -60,6 +60,18 @@ Use them rather than guessing. You do not know today's weather, whether a
 museum is open, or when the last streetcar runs, and inventing those details
 makes you useless.
 
+MEMORY. Call recall_preferences at the start of a planning task to see what
+this traveller has told you before.
+
+When they state a preference, decide whether it is durable before saving it:
+  "I'd rather walk than take a bus"   -> remember(scope='standing')
+  "I never travel before 9am"          -> remember(scope='standing')
+  "I need to be there by 3pm"          -> scope='trip'; do NOT persist
+  "today I'm in a hurry"               -> scope='trip'
+A one-off saved as standing quietly constrains every future journey, and
+nobody will connect next month's odd answer to today's throwaway remark.
+When in doubt, use 'trip'.
+
 CHOOSING BETWEEN THE SCHEDULE AND THE GUIDES — get this right first:
   "when", "how do I get to", "what time", "which route"  -> plan_journey /
       query_transit. The schedule is authoritative and the guides are not.
@@ -254,6 +266,7 @@ def run(user_message: str, verbose: bool = True, require_times: bool = False,
     barren: dict[str, int] = {}       # tool -> consecutive useless results
     pushed_back = False               # allow exactly one "go do the work"
     grounding_pushed = False          # and exactly one "cite what you retrieved"
+    empty_retried = False             # and exactly one "you said nothing"
 
     for step in range(MAX_STEPS):
         remaining = MAX_STEPS - step
@@ -355,8 +368,24 @@ def run(user_message: str, verbose: bool = True, require_times: bool = False,
                     })
                     continue
 
-            trace.event("final", step=step, content=message.content)
-            return message.content or "(empty response)"
+            # A model that finishes its tool calls and then says nothing has
+            # not answered. One run saved two preferences and returned an
+            # empty string. Ask once, without tools, for the actual reply.
+            if not draft.strip() and not empty_retried:
+                empty_retried = True
+                if verbose:
+                    print("  [!] empty final answer — asking again",
+                          file=sys.stderr)
+                messages.append({
+                    "role": "user",
+                    "content": ("You returned nothing. Summarise what you did "
+                                "and answer the question in plain prose."),
+                })
+                response = call_model(messages, verbose=verbose, use_tools=False)
+                draft = response.choices[0].message.content or ""
+
+            trace.event("final", step=step, content=draft)
+            return draft or "(empty response)"
 
         # The assistant turn must go into history before the tool results,
         # or the next request will 400 on a dangling tool_call_id.

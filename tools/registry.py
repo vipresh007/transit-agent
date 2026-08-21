@@ -13,6 +13,10 @@ Three exports, and they must stay in sync:
 from .geo import POI_TAGS, find_pois, geocode, get_weather
 from .guides import guides_status, search_guides
 from .journey import plan_journey
+from memory import (
+    TOOL_FUNCTIONS as MEMORY_FUNCTIONS,
+    TOOL_SCHEMAS as MEMORY_SCHEMAS,
+)
 from .transit import (
     describe_transit_schema,
     find_direct_trips,
@@ -255,7 +259,7 @@ TOOL_SCHEMAS = [
             },
         },
     },
-]
+] + MEMORY_SCHEMAS
 
 # Name -> function, so the loop can dispatch on whatever the model asks for.
 TOOL_FUNCTIONS = {
@@ -268,6 +272,7 @@ TOOL_FUNCTIONS = {
     "find_direct_trips": find_direct_trips,
     "plan_journey": plan_journey,
     "search_guides": search_guides,
+    **MEMORY_FUNCTIONS,
 }
 
 # Tools whose output can constitute a VERIFIED schedule time.

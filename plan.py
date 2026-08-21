@@ -33,6 +33,7 @@ import agent
 import constraints
 import grounding
 import llm
+import memory
 import providers
 from agent import run
 from llm import call_model
@@ -247,10 +248,17 @@ def main() -> None:
         "How do I get from Kensington Market to the Distillery District "
         "on a weekday morning?"
     )
+    # Environment first, then memory fills the gaps. Precedence matters: what
+    # the traveller says NOW must beat what they said last week, or stored
+    # memory becomes impossible to escape without editing a database.
     prefs = constraints.Preferences.from_env()
+    prefs, remembered = memory.apply_to(prefs)
 
     print(f"Researching: {question}", file=sys.stderr)
-    print(f"Constraints: {prefs.describe()}\n", file=sys.stderr)
+    print(f"Constraints: {prefs.describe()}", file=sys.stderr)
+    if remembered:
+        print(f"  (from memory: {', '.join(remembered)})", file=sys.stderr)
+    print(file=sys.stderr)
 
     # State the constraints up front as well as checking them afterwards.
     # Verification alone would work, but every violation costs a repair round,
@@ -303,6 +311,16 @@ def main() -> None:
         itinerary, violations = repair(itinerary, violations, prefs,
                                        collected_sources=sources)
 
+    # Surviving violations go INTO the itinerary, not just onto stderr.
+    # A run left an invented 08:10:26 departure in the printed output with the
+    # warning on a stream the reader may not even see. Detecting a problem and
+    # then presenting the output as fact anyway is the same failure as not
+    # detecting it — worse, because we knew.
+    if violations:
+        itinerary.caveats = [
+            f"UNVERIFIED: {v.detail}" for v in violations
+        ] + list(itinerary.caveats)
+
     print(itinerary.render())
 
     if violations:
@@ -329,6 +347,7 @@ def main() -> None:
             "grounding": ground,
             "constraints": {
                 "preferences": prefs.describe(),
+                "from_memory": remembered,
                 "violations": [str(v) for v in violations],
             },
         },
