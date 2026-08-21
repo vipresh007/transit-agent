@@ -309,6 +309,18 @@ def main() -> None:
     # again, which resets the trace.
     sources = [e["result"] for e in agent.trace.EVENTS if e["kind"] == "tool_call"]
 
+    # An infeasible result has no times, so "no schedule data was retrieved"
+    # and an UNVERIFIED TIMES flag are noise — they describe a missing
+    # verification of something that was never claimed. Warnings about absent
+    # data only make sense when data was supposed to be there.
+    if not itinerary.feasible:
+        itinerary.caveats = [
+            c for c in itinerary.caveats
+            if "no schedule data" not in c.lower()
+            and "estimates" not in c.lower()
+        ]
+        no_schedule_data = False
+
     violations = [] if not itinerary.feasible else constraints.verify(
         itinerary, prefs)
     if violations:
@@ -357,7 +369,9 @@ def main() -> None:
         },
     )
     flags = []
-    if no_schedule_data:
+    if not itinerary.feasible:
+        flags.append("NO ROUTE")
+    elif no_schedule_data:
         flags.append("UNVERIFIED TIMES")
     if truncated:
         flags.append("TRUNCATED")

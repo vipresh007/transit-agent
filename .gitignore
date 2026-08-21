@@ -16,3 +16,7 @@ tests/__pycache__/
 guides.db
 guides_raw.json
 memory.db
+
+# stage 10: langgraph checkpoints (SQLite writes -wal and -shm alongside)
+graph.db
+graph.db-*

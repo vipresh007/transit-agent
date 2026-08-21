@@ -83,3 +83,49 @@ fake.chat.completions.create.return_value = says("merged answer")
 out = crew.synthesize("q", results, verbose=False)
 print("synthesis still produced an answer:", out[:40])
 print("\nALL CREW CHECKS PASS")
+
+# --- two-level grounding -----------------------------------------------------
+# The gap this closes, from a real run: the synthesiser wrote "walk north under
+# the Gardiner to reach the Distillery District" (it is east) and "509 or 510
+# from Union Station" (the 510 does not serve Union). No section said either.
+# Research grounding passed both at 87% because the union of three subtasks'
+# tool output contains all those words somewhere; it spent its complaints on
+# 'Saturdays' and 'African' instead.
+print("\ntwo-level grounding")
+
+results = [
+    {"index": 0, "task": "morning", "answer": "Visit the Distillery District.",
+     "error": None, "seconds": 0.0, "flags": {}, "events": [
+         {"kind": "tool_call",
+          "result": "Distillery District: pedestrian-only. Harbourfront "
+                    "Centre is on the lake. The 509 runs from Union Station. "
+                    "The 510 Spadina runs north from Queens Quay."}]},
+    {"index": 1, "task": "lunch", "answer": "Eat at St. Lawrence Market.",
+     "error": None, "seconds": 0.0, "flags": {}, "events": [
+         {"kind": "tool_call", "result": "St. Lawrence Market, 93 Front St E."}]},
+]
+
+faithful = "Visit the Distillery District, then eat at St. Lawrence Market."
+a = crew.audit(faithful, results)
+assert not a["synthesis"]["unsupported"], a["synthesis"]["unsupported"]
+print("  a merge that only reuses section text is clean")
+
+invented = (faithful + " Walk north under the Gardiner to reach the "
+                       "Distillery District, or take the 510 from Union Station.")
+a = crew.audit(invented, results)
+assert a["synthesis"]["unsupported"], "invented joining material went unflagged"
+# The point of the second level: research grounding is the weaker check here,
+# because its haystack is every tool result from every subtask.
+assert a["synthesis"]["coverage"] < a["research"]["coverage"], (
+    a["synthesis"]["coverage"], a["research"]["coverage"])
+print(f"  invented connective tissue caught: synthesis "
+      f"{a['synthesis']['coverage']:.0%} vs research "
+      f"{a['research']['coverage']:.0%}")
+
+# Choosing is allowed; altering is not. Dropping a candidate must not be
+# reported as an unsupported claim.
+a = crew.audit("Eat at St. Lawrence Market.", results)
+assert not a["synthesis"]["unsupported"], a["synthesis"]["unsupported"]
+print("  dropping a candidate is not flagged as invention")
+
+print("\nALL GROUNDING-AUDIT CHECKS PASS")

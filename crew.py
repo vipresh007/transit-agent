@@ -72,21 +72,33 @@ downtown Toronto around 1pm?"]
 """
 
 SYNTHESIS_PROMPT = """\
-Combine these independently-researched answers into one reply to the original
-request.
+Combine these independently-researched answers into ONE answer to the
+original request.
 
 ORIGINAL REQUEST: {question}
 
 {sections}
 
+Your job is to CHOOSE, not to concatenate. Each section researched its part
+without seeing the others, so each returned a list of candidates. The reply
+must be a single recommendation.
+
 Rules:
-- Keep every concrete detail — times, routes, venue names — exactly as
-  researched. Do not round, adjust, or "tidy" a time.
+- Pick ONE option per part of the request. Say in one line why you picked it,
+  using only what the sections report. List the rest under "Other options"
+  as bare names, no detail.
+- Prefer choices that fit together. If the sections give locations, favour
+  ones that are near each other, and say when they are not.
+- Reproduce any detail you DO keep exactly as researched — times, routes,
+  addresses, prices. Never round or tidy a time. Dropping a candidate is
+  fine; altering one is not.
+- Add NO facts of your own. You have no tools here. That includes joining
+  material: do not state which streetcar connects two places, which direction
+  one is from another, or how long anything takes, unless a section says so.
+  Invented connective tissue is the most common error at this step.
 - If two sections disagree, say so rather than silently picking one.
-- Do not add facts that appear in none of the sections. You have no tools
-  here; anything you add is from memory, not research.
 - Preserve caveats. A section that flagged something unverified must keep
-  that flag in the merged answer.
+  that flag.
 """
 
 
@@ -193,6 +205,45 @@ def synthesize(question: str, results: list[dict], verbose: bool = True) -> str:
     return response.choices[0].message.content or sections
 
 
+def audit(answer: str, results: list[dict]) -> dict:
+    """Ground the merged answer at two levels, because they catch different lies.
+
+    RESEARCH grounding compares the answer to the raw tool results. Every
+    subagent already does this on its own output, so at the crew level it is
+    mostly redundant — and it is also too forgiving. The union of three
+    subtasks' tool output is a large haystack, so a sentence assembled from
+    words scattered across three unrelated sources scores as supported.
+
+    SYNTHESIS grounding compares the merged answer to the SECTION ANSWERS.
+    That is the check that was missing. The synthesiser has no tools, so
+    anything in the final text that no section said is invention — and it is
+    invention of a specific, plausible kind: joining material. A real run
+    produced "walk north under the Gardiner to reach the Distillery District"
+    (it is east) and "509 or 510 from Union Station" (the 510 does not serve
+    Union). Neither claim came from a section. Both passed research grounding
+    at 87%, which instead flagged 'Saturdays', 'Group' and 'African'.
+
+    Two checks against different haystacks, because "did the research support
+    this" and "did the merge stay faithful to the research" are not the same
+    question and fail in different ways.
+    """
+    sources = [e["result"] for r in results for e in r["events"]
+               if e["kind"] == "tool_call"]
+    sections = [r["answer"] for r in results if r["answer"]]
+    return {
+        "research": grounding.check(answer, sources),
+        "synthesis": grounding.check(answer, sections),
+    }
+
+
+def report_grounding(audited: dict) -> None:
+    for level in ("research", "synthesis"):
+        result = audited[level]
+        if result["unsupported"]:
+            print(f"  [grounding/{level}] {grounding.summary(result)}",
+                  file=sys.stderr)
+
+
 def main() -> None:
     question = " ".join(sys.argv[1:]) or (
         "Plan me a Saturday in Toronto: somewhere to spend the morning, "
@@ -213,12 +264,9 @@ def main() -> None:
     answer = synthesize(question, results)
     print(answer)
 
-    # Grounding across ALL subtasks' tool results, not just the last thread's.
-    sources = [e["result"] for r in results for e in r["events"]
-               if e["kind"] == "tool_call"]
-    ground = grounding.check(answer, sources)
-    if ground["unsupported"]:
-        print(f"\n  [grounding] {grounding.summary(ground)}", file=sys.stderr)
+    print(file=sys.stderr)
+    ground = audit(answer, results)
+    report_grounding(ground)
 
     elapsed = time.time() - t0
     print(f"\n[{llm.usage_line()} | {len(tasks)} subtasks | {elapsed:.0f}s]",

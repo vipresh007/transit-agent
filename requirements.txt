@@ -2,3 +2,9 @@ openai>=1.60.0
 python-dotenv>=1.0.1
 requests>=2.32.0
 pydantic>=2.9.0
+
+
+# Stage 10 only (optional). graph.py is a comparison against crew.py;
+# nothing else imports langgraph and every other suite runs without it.
+langgraph
+langgraph-checkpoint-sqlite
