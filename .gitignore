@@ -13,3 +13,5 @@ data/
 .cache/
 traces/
 tests/__pycache__/
+guides.db
+guides_raw.json

@@ -11,6 +11,7 @@ Three exports, and they must stay in sync:
 """
 
 from .geo import POI_TAGS, find_pois, geocode, get_weather
+from .guides import guides_status, search_guides
 from .journey import plan_journey
 from .transit import (
     describe_transit_schema,
@@ -110,6 +111,36 @@ TOOL_SCHEMAS = [
                     },
                 },
                 "required": ["lat", "lon"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_guides",
+            "description": (
+                "Search Wikivoyage travel guides for Toronto: what a "
+                "neighbourhood is like, what's worth seeing, where to eat, "
+                "local quirks and advice. Use for subjective or descriptive "
+                "questions ('what's Kensington Market like?', 'somewhere to "
+                "eat near the Distillery'). Do NOT use for schedules, "
+                "departure times or routes — the guides contain prose, not "
+                "timetables, and plan_journey is authoritative for those."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What you want to know, in natural "
+                        "language. Full questions work better than keywords.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "How many passages to return. Default 4.",
+                    },
+                },
+                "required": ["query"],
             },
         },
     },
@@ -236,6 +267,7 @@ TOOL_FUNCTIONS = {
     "find_nearby_stops": find_nearby_stops,
     "find_direct_trips": find_direct_trips,
     "plan_journey": plan_journey,
+    "search_guides": search_guides,
 }
 
 # Tools whose output can constitute a VERIFIED schedule time.

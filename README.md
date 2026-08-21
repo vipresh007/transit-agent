@@ -23,7 +23,17 @@ python agent.py "what should I do in Toronto tomorrow?"
 
 You should see tool calls printed to stderr, then an answer. If the agent
 answers without calling any tools, that's the first thing worth debugging —
-usually the tool descriptions in `tools.py` aren't specific enough.
+usually a tool description in `tools/registry.py` isn't specific enough.
+
+Full setup, in order:
+
+```bash
+python load_gtfs.py                 # TTC schedule -> transit.db  (~3 min)
+python optimize_db.py               # indexes the journey planner needs
+ollama pull nomic-embed-text        # local embedding model
+python load_guides.py               # Wikivoyage -> guides.db     (~6 min)
+python tests/run_all.py             # verify, free
+```
 
 ## Getting a Gemini API key (free, no card)
 
@@ -32,13 +42,14 @@ usually the tool descriptions in `tools.py` aren't specific enough.
    make one. You do not need to enable billing.
 3. Copy the key into `.env`.
 
-Free tier as of mid-2026: roughly 250 requests/day on `gemini-2.5-flash`,
-~1,000/day on `gemini-2.5-flash-lite`. One agent run burns several requests,
-so switch to flash-lite when you're iterating hard.
+Free tiers move constantly — three model names in this project broke within a
+week. Run `python list_models.py` to see what your keys actually serve, and
+avoid `-latest` aliases: they resolve to the newest model, which is the one
+with the smallest free quota.
 
-Because we use Google's OpenAI-compatible endpoint, you can swap providers by
-changing `base_url` and `MODEL` — Groq, OpenRouter, and Ollama all work with
-this same code.
+Providers are configured in `.env` and tried in order, so a quota wall fails
+over instead of ending the run. `PROVIDER=groq` pins one (and makes the
+response cache usable, since the model name is part of the cache key).
 
 ## Files
 
@@ -52,12 +63,15 @@ this same code.
 | `tools/geo.py` | Geocoding, weather, POIs (external APIs). |
 | `tools/transit.py` | GTFS schema access and stop/trip lookups. |
 | `tools/journey.py` | End-to-end journey planning with transfers. |
+| `tools/guides.py` | Hybrid retrieval over the Wikivoyage guides. |
+| `embeddings.py` | Provider-agnostic embedding (Ollama, Mistral, Gemini). |
 | `tools/registry.py` | Tool schemas + dispatch table. |
 | `schemas.py` | The typed `Itinerary` and its validators. |
 | `plan.py` | Two-phase research → structured itinerary. |
 | `evals.py` | Test suite, plus `--selftest` for the checkers. |
 
-Scripts: `load_gtfs.py` (build the DB), `optimize_db.py` (add indexes),
+Scripts: `load_gtfs.py` (build the transit DB), `load_guides.py` (build the
+guide index), `optimize_db.py` (add indexes),
 `list_models.py` (what your keys can actually use).
 
 ## Tests
@@ -134,15 +148,17 @@ then a toolless structuring pass that emits JSON validated against the
 `Itinerary` model in `schemas.py`. Validation errors are fed back with the
 offending field named — self-correction against a perfect grader.
 
-**Stage 4 — evaluation**
-Write 15–20 questions with known-correct answers, plus constraint assertions:
-no leg before 09:00, every transfer ≥10 minutes, no stop visited on a day it's
-closed. This is the stage everyone skips. Don't. Without it, stages 5–8 are
-guesswork.
+**Stage 5 — RAG over Wikivoyage** ✅
+`ollama pull nomic-embed-text` then `python load_guides.py`. Chunks on section
+boundaries (not character counts), embeds locally, stores vectors as blobs in
+SQLite. `search_guides` does hybrid retrieval — dense + FTS5, fused with
+Reciprocal Rank Fusion — with a relevance floor so out-of-corpus questions
+return "nothing here" instead of the nearest weak match.
 
-**Stage 5 — RAG over Wikivoyage**
-Download the Toronto article (and a few neighbourhood pages), chunk it, embed
-it, store in Chroma. Add a `search_guides` tool. Watch your eval scores.
+Measured, not assumed: `python tests/check_retrieval.py` runs probes and an
+ablation. On this corpus the two retrievers pick different top results on 5 of
+9 probes — dense alone answered "somewhere to eat late at night" with a bed &
+breakfast section, having latched onto "night".
 
 **Stage 6 — agentic RAG**
 The interesting one. The agent must decide *whether* to retrieve: "what's

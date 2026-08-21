@@ -264,7 +264,70 @@ def case_journey():
     )
 
 
+
+def _guides_ready() -> bool:
+    import os
+    return os.path.exists("guides.db")
+
+
+def case_guide_character():
+    """Descriptive question that only the travel guides can answer.
+
+    Ground truth comes from FTS, not from vector search: the eval must not
+    depend on an embedding provider being up, and it must not use the same
+    retrieval path it's testing. Distinctive vocabulary from the actual
+    corpus is the check — an answer built from the guides will echo some of
+    it; an answer from the model's own knowledge of Toronto probably won't.
+    """
+    conn = sqlite3.connect(f"file:guides.db?mode=ro", uri=True)
+    try:
+        row = conn.execute(
+            "SELECT text FROM chunks WHERE article LIKE '%Kensington%' "
+            "AND heading LIKE '%Understand%' LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+    source = (row[0] if row else "").lower()
+
+    # Terms that appear in the guide passage. Requiring several rather than
+    # one avoids passing on a lucky single word.
+    candidates = ["bohemian", "vintage", "jewish", "multicultural",
+                  "car-free", "augusta", "market"]
+    present = [w for w in candidates if w in source]
+
+    def check(ans: str) -> bool:
+        flat = normalize(ans)
+        return sum(1 for w in present if w in flat) >= 2
+
+    return (f"answer echoes >=2 guide terms from {present}", check)
+
+
+def case_guide_out_of_scope():
+    """The guides cover Toronto. Asked about Osaka, retrieval returns its
+    nearest Toronto match at ~0.50 — worthless. The agent must say it
+    doesn't know rather than dress up a weak match as an answer."""
+
+    def check(ans: str) -> bool:
+        flat = normalize(ans)
+        # Must not present Toronto restaurants as an answer about Osaka.
+        pretends = "osaka" in flat and any(
+            w in flat for w in ["recommend", "try ", "you should visit"]
+        )
+        admits = contains_any(ans, [
+            "don't have", "do not have", "no information", "not cover",
+            "doesn't cover", "only cover", "toronto", "cannot", "can't",
+            "outside", "not in the guides", "unable",
+        ])
+        return admits and not pretends
+
+    return ("answer admits the Toronto guides don't cover Osaka", check)
+
+
 CASES = {
+    "guide_character": ("what is Kensington Market like as a neighbourhood?",
+                        case_guide_character),
+    "guide_out_of_scope": ("what's the best ramen in Osaka?",
+                           case_guide_out_of_scope),
     "journey": ("how do I get from Kensington Market to the Distillery "
                 "District on a weekday morning?", case_journey),
     "last_501": ("what's the last eastbound 501 Queen streetcar on a weekday?",
@@ -327,6 +390,16 @@ SELFTEST = [
     ("journey",
      "Take the 510 then the 504 to the Distillery District, about 40 minutes.",
      False),
+    ("guide_character",
+     "Kensington Market is a bohemian, multicultural pocket of narrow "
+     "car-free streets full of vintage shops.", True),
+    ("guide_character",
+     "Kensington Market is a nice area with shops and restaurants.", False),
+    ("guide_out_of_scope",
+     "My guides only cover Toronto, so I don't have information on Osaka.",
+     True),
+    ("guide_out_of_scope",
+     "For ramen in Osaka you should try the places around Dotonbori.", False),
 ]
 
 
