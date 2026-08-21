@@ -1,204 +1,51 @@
+"""The agent loop.
+
+No framework. Send the conversation plus tool schemas, get back either text
+(done) or tool calls (not done); run the tools, append results, repeat. That
+is the whole idea — everything else in agent frameworks is ergonomics,
+persistence and error handling layered on top.
+
+What lives elsewhere, so this file stays readable:
+    providers.py  which model, failover, pacing
+    llm.py        retries, rate limits, quota, token accounting
+    cache.py      replaying identical requests
+    trace.py      the JSON record of a run
+    tools/        the tools themselves
+
+What's left here is the loop and the guardrails around it, each of which
+exists because of a specific failure:
+    step budget + nudge      it explored forever and got guillotined
+    forced final answer      it returned "I gave up" holding good data
+    duplicate blocking       five find_pois calls at different radii
+    barren-result blocking   it retried tools that kept returning nothing
+    times pushback           it answered in 2 steps with invented times
+    LAST_RUN flags           a clean-looking run that verified nothing
+
+Run:  python agent.py "what's the last eastbound 501 on a weekday?"
 """
-Stage 1: the agent loop, written out by hand.
 
-No framework. ~60 lines of real logic. Read it once and you will understand
-what LangGraph and CrewAI are doing underneath, which makes choosing between
-them a lot easier later.
-
-The loop:
-    1. Send the conversation + tool schemas to the model.
-    2. Model replies with either text (done) or tool calls (not done).
-    3. If tool calls: run them, append the results, go back to 1.
-
-That is the entire idea. Everything else in agent frameworks is ergonomics,
-persistence, and error handling layered on top of this.
-
-Run:  python agent.py "what's the weather like in Toronto this week?"
-"""
-
-import hashlib
 import json
 import os
-import random
 import re
 import sys
 import time
 from datetime import date
-from pathlib import Path
 
 from dotenv import load_dotenv
-from openai.types.chat import ChatCompletion
-from openai import (
-    APIConnectionError,
-    APITimeoutError,
-    BadRequestError,
-    InternalServerError,
-    NotFoundError,
-    OpenAI,
-    RateLimitError,
-)
-
-from tools import SCHEDULE_TOOLS, TOOL_FUNCTIONS, TOOL_SCHEMAS
+from openai import NotFoundError
 
 load_dotenv()
 
-# ---------------------------------------------------------------------------
-# Providers.
-#
-# Every one of these speaks the OpenAI chat-completions format, which is why
-# we used the OpenAI SDK instead of Google's native one. When a free tier runs
-# dry mid-run, we move to the next provider and CARRY THE CONVERSATION WITH US
-# rather than starting over. Failing over to a backup is standard practice for
-# anything that depends on someone else's rate limit.
-#
-# Order matters: first one with a key present is used first.
-# ---------------------------------------------------------------------------
-PROVIDERS = [
-    {
-        "name": "gemini",
-        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-        "key_env": "GEMINI_API_KEY",
-        "model": os.getenv("MODEL", "gemini-3.6-flash"),
-    },
-    {
-        "name": "groq",
-        "base_url": "https://api.groq.com/openai/v1",
-        "key_env": "GROQ_API_KEY",
-        "model": os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
-    },
-    {
-        "name": "cerebras",
-        "base_url": "https://api.cerebras.ai/v1",
-        "key_env": "CEREBRAS_API_KEY",
-        "model": os.getenv("CEREBRAS_MODEL", "llama-3.3-70b"),
-    },
-    {
-        "name": "mistral",
-        "base_url": "https://api.mistral.ai/v1",
-        "key_env": "MISTRAL_API_KEY",
-        "model": os.getenv("MISTRAL_MODEL", "mistral-large-latest"),
-        # Free tier throttles per second and its 429 carries no retry delay,
-        # so backing off after the fact is guesswork. Pacing requests avoids
-        # the limit instead of reacting to it.
-        "min_interval": 1.5,
-    },
-    {
-        "name": "openrouter",
-        "base_url": "https://openrouter.ai/api/v1",
-        "key_env": "OPENROUTER_API_KEY",
-        "model": os.getenv("OPENROUTER_MODEL", "qwen/qwen3-235b-a22b:free"),
-    },
-    {
-        "name": "ollama",
-        "base_url": os.getenv("OLLAMA_URL", "http://localhost:11434/v1"),
-        "key_env": "OLLAMA_ENABLED",
-        "model": os.getenv("OLLAMA_MODEL", "qwen2.5:7b"),
-    },
-]
+import cache
+import llm
+import providers
+import trace
+from llm import DailyQuotaExhausted, call_model
+from tools import SCHEDULE_TOOLS, TOOL_FUNCTIONS
 
-AVAILABLE = [p for p in PROVIDERS if os.getenv(p["key_env"])]
-if not AVAILABLE:
-    sys.exit("No provider configured. Set GEMINI_API_KEY or GROQ_API_KEY in .env")
-
-# PROVIDER=groq forces a specific one and disables failover.
-_forced = os.getenv("PROVIDER")
-if _forced:
-    AVAILABLE = [p for p in AVAILABLE if p["name"] == _forced] or sys.exit(
-        f"PROVIDER={_forced} has no key configured"
-    )
-
-_active = 0
-provider = AVAILABLE[0]
-MODEL = provider["model"]
-client = OpenAI(
-    api_key=os.getenv(provider["key_env"]), base_url=provider["base_url"]
-)
-
-MAX_STEPS = int(os.getenv("MAX_STEPS", "12"))
-
-# Temperature 0 by default. Two reasons, both practical rather than about
-# answer quality:
-#   1. Reproducibility. Chasing a bug through a loop that takes a different
-#      path each run is miserable.
-#   2. The cache only works if runs are deterministic. One differing response
-#      changes the message history for every later step, so every later key
-#      misses. A stochastic multi-turn loop is effectively uncacheable.
-TEMPERATURE = float(os.getenv("TEMPERATURE", "0"))
+MAX_STEPS = providers.MAX_STEPS
 
 
-def switch_provider() -> bool:
-    """Move to the next configured provider. False if none are left."""
-    global _active, provider, client, MODEL
-    if _active + 1 >= len(AVAILABLE):
-        return False
-    if CACHE_ENABLED:
-        # Worth saying out loud: the model name is part of the cache key, so
-        # switching mid-run means every subsequent step is a guaranteed miss,
-        # and the next run will diverge at a different point. Caching and
-        # failover fight each other; pin PROVIDER when you want replays.
-        print(
-            "  . note: provider switch invalidates the cache for the rest of "
-            "this run — pin PROVIDER= in .env for reproducible replays",
-            file=sys.stderr,
-        )
-    _active += 1
-    provider = AVAILABLE[_active]
-    MODEL = provider["model"]
-    client = OpenAI(
-        api_key=os.getenv(provider["key_env"]), base_url=provider["base_url"]
-    )
-    return True
-
-
-def sanitize(messages: list) -> list:
-    """Strip provider-specific extras before sending history elsewhere.
-
-    Gemini attaches thought_signature to tool calls. Groq has never seen that
-    field and may reject it. When you fail over mid-conversation you're handing
-    one vendor's history to another, so scrub anything vendor-specific first.
-    """
-    if provider["name"] == "gemini":
-        return messages
-
-    cleaned = []
-    for m in messages:
-        if m.get("role") == "assistant" and m.get("tool_calls"):
-            m = dict(m)
-            m["tool_calls"] = [
-                {k: v for k, v in tc.items() if k != "extra_content"}
-                for tc in m["tool_calls"]
-            ]
-        cleaned.append(m)
-    return cleaned
-
-# Gemini's thinking models sign their reasoning and attach the signature to
-# each tool call in a NON-STANDARD field:
-#     tool_calls[0].extra_content.google.thought_signature
-# If you don't echo it back on the next turn, Gemini 400s with
-# "Function call is missing a thought_signature".
-#
-# The OpenAI SDK keeps unknown fields in .model_extra, so the fix is to hand
-# the whole message object back rather than rebuilding it field by field.
-# Lesson: an OpenAI-compatible endpoint is compatible, not identical.
-#
-# Set THINKING_BUDGET=0 in .env to turn thinking off instead — no reasoning,
-# no signatures, no problem. Cheaper and faster, but weaker at multi-step
-# planning, which is most of what this project is about.
-THINKING_BUDGET = os.getenv("THINKING_BUDGET")
-
-EXTRA_BODY = {}
-if THINKING_BUDGET is not None:
-    EXTRA_BODY = {
-        "extra_body": {
-            "google": {"thinking_config": {"thinking_budget": int(THINKING_BUDGET)}}
-        }
-    }
-
-# A model has no clock. Left to itself it assumes a date from its training
-# data -- this one filtered the schedule on 2024-06-10 against a feed covering
-# July-September 2026, got zero rows three times, and reported estimates.
-# Anything time-relative ("this morning", "today", "next Monday") is
-# unanswerable without this line.
 TODAY = date.today()
 
 SYSTEM_PROMPT = f"""You are a travel planning assistant for Toronto.
@@ -278,227 +125,10 @@ the data doesn't support a confident answer, say so plainly instead of
 filling the gap."""
 
 
-# Errors worth retrying: the server was busy, rate-limited us, or the network
-# hiccuped. A 400 (bad request) is NOT here — retrying a malformed request just
-# fails again more slowly.
-RETRIABLE = (InternalServerError, RateLimitError, APIConnectionError, APITimeoutError)
-
-# Requests are the obvious thing to count and the wrong one. Groq caps tokens
-# per day (200k), and a single agent run can spend 15k of them, because every
-# turn resends the entire conversation. Track both; the token number is the
-# one that will surprise you.
-REQUEST_COUNT = {"n": 0, "prompt_tokens": 0, "completion_tokens": 0}
-
-
-class DailyQuotaExhausted(RuntimeError):
-    """Out of requests for the day. Waiting will not help."""
-
-
-def _is_daily_quota(exc: Exception) -> bool:
-    """Distinguish 'slow down' from 'come back tomorrow'.
-
-    Both arrive as 429. A per-minute limit clears in seconds and is worth
-    retrying; a per-day quota does not clear until midnight Pacific, so
-    retrying it just spends more of a budget you've already exhausted.
-    """
-    text = str(exc)
-    return "PerDay" in text or "per day" in text.lower()
-
-
-# How long we're willing to sit and wait for a rate limit to clear before
-# giving up or failing over. Five minutes is annoying; an hour is a hang.
-MAX_WAIT_SECONDS = float(os.getenv("MAX_WAIT_SECONDS", "420"))
-
-
-def _server_retry_delay(exc: Exception) -> float | None:
-    """Providers usually tell you exactly how long to wait. Believe them.
-
-    Handles the formats seen in practice:
-      Google: "Please retry in 28.142564072s" / "'retryDelay': '28s'"
-      Groq:   "Please try again in 5m4.128s"
-    """
-    text = str(exc)
-
-    # Groq's compound form: 5m4.128s, or 1h2m3s.
-    compound = re.search(
-        r"try again in (?:(\d+)h)?(?:(\d+)m)?(\d+(?:\.\d+)?)s", text
-    )
-    if compound:
-        h, m, s = compound.groups()
-        return int(h or 0) * 3600 + int(m or 0) * 60 + float(s)
-
-    match = re.search(r"retry in (\d+(?:\.\d+)?)s", text)
-    if match:
-        return float(match.group(1))
-    match = re.search(r"'retryDelay': '(\d+(?:\.\d+)?)s'", text)
-    return float(match.group(1)) if match else None
-
-
-def call_model(messages, attempts: int = 5, verbose: bool = True, use_tools: bool = True):
-    """Call the model, retrying transient failures with exponential backoff.
-
-    Free tiers are noisy: 503s under load and per-minute 429s are routine.
-    Without retries, one blip discards every tool call made so far.
-
-    But retries are not free -- each one spends quota. Retrying a daily-quota
-    429 is strictly worse than failing fast, which is a mistake this code
-    originally made. Knowing which errors are worth retrying is the actual
-    skill; "wrap it in a retry" is not.
-    """
-    sent = sanitize(messages)
-
-    if CACHE_ENABLED:
-        key = _cache_key(MODEL, sent, use_tools)
-        hit = _cache_read(key)
-        if hit is not None:
-            CACHE_STATS["hits"] += 1
-            if verbose:
-                print(f"  . cache hit ({key[:8]})", file=sys.stderr)
-            return hit
-        CACHE_STATS["misses"] += 1
-
-    delay = 2.0
-    last_exc: Exception | None = None
-    waits = 0
-    for attempt in range(attempts):
-        try:
-            throttle(verbose)
-            REQUEST_COUNT["n"] += 1
-            response = client.chat.completions.create(
-                model=MODEL,
-                messages=sent,
-                temperature=TEMPERATURE,
-                # Omitting tools entirely is what forces a text answer. Asking
-                # nicely in the prompt is not reliable; removing the option is.
-                tools=TOOL_SCHEMAS if use_tools else None,
-                # Gemini-only knob; sending it to Groq would 400.
-                extra_body=(EXTRA_BODY or None)
-                if provider["name"] == "gemini"
-                else None,
-            )
-            usage = getattr(response, "usage", None)
-            if usage:
-                REQUEST_COUNT["prompt_tokens"] += usage.prompt_tokens or 0
-                REQUEST_COUNT["completion_tokens"] += usage.completion_tokens or 0
-            if CACHE_ENABLED:
-                _cache_write(key, response)
-            return response
-        except RateLimitError as exc:
-            # A stated retry delay beats our own classification. Groq's
-            # "tokens per day" limit is a ROLLING window that can clear in
-            # minutes; treating it as terminal because the words "per day"
-            # appear threw away a run that only needed to wait five minutes.
-            # Trust the server's number over our guess about its semantics.
-            last_exc = exc
-            stated = _server_retry_delay(exc)
-            if stated is not None and stated <= MAX_WAIT_SECONDS:
-                waits += 1
-                # Waiting twice and still being throttled means this provider
-                # is saturated, not momentarily busy. Sitting through five
-                # 57-second waits burns four minutes to reach the same place.
-                # If we have a backup, use it.
-                if waits >= 2 and switch_provider():
-                    if verbose:
-                        print(
-                            f"  ~ still rate limited — switching to "
-                            f"{provider['name']} ({MODEL})",
-                            file=sys.stderr,
-                        )
-                    waits = 0
-                    continue
-                if verbose:
-                    print(
-                        f"  ~ rate limited; server says retry in {stated:.0f}s "
-                        f"— waiting (attempt {attempt + 1}/{attempts})",
-                        file=sys.stderr,
-                    )
-                time.sleep(stated + 1)
-                continue
-
-            if _is_daily_quota(exc):
-                exhausted = provider["name"]
-                # Waiting won't help, but another provider might.
-                if switch_provider():
-                    if verbose:
-                        print(
-                            f"  ~ {exhausted} daily quota exhausted — "
-                            f"failing over to {provider['name']} ({MODEL})",
-                            file=sys.stderr,
-                        )
-                    continue  # same request, new provider, history intact
-                raise DailyQuotaExhausted(
-                    f"Daily quota exhausted for {exhausted} ({MODEL}), and no "
-                    f"other provider is configured.\n"
-                    f"Used {REQUEST_COUNT['n']} requests this run.\n\n"
-                    "Options:\n"
-                    "  1. Add GROQ_API_KEY to .env — https://console.groq.com/keys\n"
-                    "  2. `python list_models.py`, switch to a flash-lite model\n"
-                    "  3. Install Ollama and set OLLAMA_ENABLED=1 for unlimited local\n"
-                    "  4. Wait for reset (midnight Pacific for Gemini)"
-                ) from exc
-            # A rate limit with no stated delay is usually per-minute, so the
-            # 2/4/8/16s schedule used for transient 5xx is too impatient --
-            # it gives up after ~30s on a window that needs 60. Start higher.
-            _backoff(exc, attempt, attempts, max(delay, 15.0), verbose)
-            delay = min(delay * 2, 60.0)
-        except BadRequestError as exc:
-            # Most 400s mean OUR request is malformed — retrying is pointless.
-            # But `tool_use_failed` means the MODEL emitted tool arguments
-            # that aren't valid JSON (e.g. a brace inside a SQL string).
-            # That's a sampling accident, and resampling usually fixes it.
-            # The provider rejects it before we see the message, so feeding
-            # the error back isn't an option — retrying is all we have.
-            if "tool_use_failed" not in str(exc):
-                raise
-            if attempt == attempts - 1:
-                raise
-            if verbose:
-                print(
-                    "  ! model emitted malformed tool-call JSON — resampling",
-                    file=sys.stderr,
-                )
-            last_exc = exc
-            time.sleep(1 + random.uniform(0, 1))
-        except RETRIABLE as exc:
-            last_exc = exc
-            if attempt == attempts - 1:
-                raise
-            _backoff(exc, attempt, attempts, delay, verbose)
-            delay *= 2
-
-    # Every `continue` above can fall through to here once attempts run out.
-    # Without this the function returns None and the caller dies on
-    # `response.choices` with an AttributeError that says nothing about the
-    # rate limit that actually caused it. A retry loop must always end in a
-    # value or an exception — never off the bottom.
-    raise last_exc or RuntimeError(
-        f"call_model exhausted {attempts} attempts without a response"
-    )
-
-
-def _backoff(exc, attempt: int, attempts: int, delay: float, verbose: bool) -> None:
-    if attempt == attempts - 1:
-        raise exc
-    # Jitter matters: without it, every client that failed together retries
-    # together and recreates the spike you were backing off from.
-    wait = _server_retry_delay(exc) or (delay + random.uniform(0, 1))
-    if verbose:
-        print(
-            f"  ! {type(exc).__name__} — retrying in {wait:.1f}s "
-            f"(attempt {attempt + 2}/{attempts})",
-            file=sys.stderr,
-        )
-    time.sleep(wait)
-
-
-# Set by run(). Callers need to know whether an answer came from a completed
-# investigation or from a truncated one — the text alone doesn't say, and a
-# model that ran out of budget will still answer confidently.
-# `truncated` was not enough. A run can stop voluntarily having learned
-# nothing -- every query errored, and the model answered anyway. So we also
-# record which tools actually RETURNED something usable. "Did the agent finish?"
-# and "did the agent find anything?" are different questions, and only the
-# second one tells you whether to trust the answer.
+# --- per-run state ---------------------------------------------------------
+# Reset at the top of every run(). These flags are how callers tell a run that
+# finished from a run that actually established something — different
+# questions, and only the second one licenses trusting the answer.
 LAST_RUN = {
     "truncated": False,
     "steps": 0,
@@ -514,8 +144,6 @@ LAST_RUN = {
 # departure times with no warning. What we actually care about is whether a
 # CLOCK TIME ever came back from the data. Matches '8:03:00' and '25:23:17'.
 GTFS_TIME_IN_RESULT = re.compile(r"\b\d{1,2}:[0-5]\d:[0-5]\d\b")
-
-# Imported from tools.py so it can't drift from the tool definitions.
 
 # Result prefixes that mean "you learned nothing". Kept as a list rather than
 # inlined so it's obvious what counts as progress and easy to adjust.
@@ -535,152 +163,6 @@ BARREN_MARKERS = (
 # 200k tokens/day) run out long before request counts do, so this is the lever
 # that actually matters.
 MAX_RESULT_CHARS = int(os.getenv("MAX_RESULT_CHARS", "2500"))
-
-
-# ---------------------------------------------------------------------------
-# Response cache.
-#
-# The dominant cost of iterating on an agent is not money, it's the wait. A
-# 12-step run takes minutes and burns quota, and most code changes -- fixing
-# a parser, a validator, a render function -- do not change what we send to
-# the model at all. Replaying those responses makes the loop instant.
-#
-# Keyed on the exact request. Change a prompt and you get a miss, correctly:
-# the cache never hides a real change in what the model was asked.
-#
-# Enable with CACHE=1. Off by default, because a cache that's silently on
-# will eventually convince you a bug is fixed when you're reading a replay.
-# ---------------------------------------------------------------------------
-CACHE_ENABLED = os.getenv("CACHE") == "1"
-CACHE_DIR = Path(os.getenv("CACHE_DIR", ".cache"))
-CACHE_STATS = {"hits": 0, "misses": 0}
-
-
-# The tool schemas are part of every request, so they must be part of the key.
-# Keying on a bare `use_tools` boolean meant editing a tool's description or
-# parameters left the cache happily replaying answers from the old tools —
-# I changed plan_journey's signature, reran, and got a byte-identical stale
-# result. A cache must be keyed on the ENTIRE request, not the parts that
-# were convenient to hash.
-TOOLS_FINGERPRINT = hashlib.sha256(
-    json.dumps(TOOL_SCHEMAS, sort_keys=True).encode()
-).hexdigest()[:12]
-
-
-def _cache_key(model: str, messages: list, use_tools: bool) -> str:
-    blob = json.dumps(
-        {
-            "model": model,
-            "messages": messages,
-            "tools": TOOLS_FINGERPRINT if use_tools else None,
-            "temperature": TEMPERATURE,
-        },
-        sort_keys=True,
-        default=str,
-    )
-    return hashlib.sha256(blob.encode()).hexdigest()[:32]
-
-
-def _cache_read(key: str):
-    path = CACHE_DIR / f"{key}.json"
-    if not path.exists():
-        return None
-    try:
-        return ChatCompletion.model_validate_json(path.read_text("utf-8"))
-    except Exception:
-        # A corrupt or stale-schema entry should never break a run.
-        path.unlink(missing_ok=True)
-        return None
-
-
-def _cache_write(key: str, response) -> None:
-    CACHE_DIR.mkdir(exist_ok=True)
-    try:
-        (CACHE_DIR / f"{key}.json").write_text(
-            response.model_dump_json(), encoding="utf-8"
-        )
-    except Exception:
-        pass  # caching is an optimisation; never let it break the run
-
-
-def cache_line() -> str:
-    h, m = CACHE_STATS["hits"], CACHE_STATS["misses"]
-    return f"cache {h} hit / {m} miss" if (h or m) else ""
-
-
-# Pacing. Some providers cap requests per second and return a bare 429 with
-# no guidance, which makes reactive backoff pure guesswork. Spacing requests
-# out is cheaper than being throttled: a 1.5s pause costs less than a failed
-# request plus an escalating backoff that may still be too short.
-_last_request_at = {"t": 0.0}
-
-
-def throttle(verbose: bool = False) -> None:
-    interval = provider.get("min_interval", 0.0) or float(
-        os.getenv("MIN_REQUEST_INTERVAL", "0")
-    )
-    if interval <= 0:
-        return
-    elapsed = time.monotonic() - _last_request_at["t"]
-    if elapsed < interval:
-        time.sleep(interval - elapsed)
-    _last_request_at["t"] = time.monotonic()
-
-
-# ---------------------------------------------------------------------------
-# Tracing.
-#
-# Every run writes a full JSON record to traces/. Reading stderr scrollback is
-# fine for a 3-step run and useless for a 12-step one -- and it loses the
-# thing you most want later: the exact tool results the model was reasoning
-# over. A trace file is greppable, diffable between runs, and shareable.
-# ---------------------------------------------------------------------------
-TRACE_DIR = Path(os.getenv("TRACE_DIR", "traces"))
-TRACE = {"events": []}
-
-
-def trace_event(kind: str, **fields) -> None:
-    TRACE["events"].append({"kind": kind, "t": round(time.time(), 3), **fields})
-
-
-def write_trace(question: str, answer: str = "", extra: dict | None = None) -> Path:
-    TRACE_DIR.mkdir(exist_ok=True)
-    path = TRACE_DIR / f"{time.strftime('%Y%m%d-%H%M%S')}.json"
-    payload = {
-        "question": question,
-        "when": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "provider": provider["name"],
-        "model": MODEL,
-        "usage": dict(REQUEST_COUNT),
-        "cache": dict(CACHE_STATS),
-        "flags": {
-            k: (sorted(v) if isinstance(v, set) else v)
-            for k, v in LAST_RUN.items()
-        },
-        "events": TRACE["events"],
-        "answer": answer,
-        **(extra or {}),
-    }
-    path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
-    # Also keep a stable filename so tooling can always find the newest run.
-    (TRACE_DIR / "latest.json").write_text(
-        json.dumps(payload, indent=2, default=str), encoding="utf-8"
-    )
-    return path
-
-
-def usage_line() -> str:
-    """One-line cost summary. Prompt tokens dominate — that's the point."""
-    p = REQUEST_COUNT["prompt_tokens"]
-    c = REQUEST_COUNT["completion_tokens"]
-    parts = [
-        f"{REQUEST_COUNT['n']} requests",
-        f"{p + c:,} tokens ({p:,} in / {c:,} out)",
-        f"{provider['name']}:{MODEL}",
-    ]
-    if cache_line():
-        parts.append(cache_line())
-    return " | ".join(parts)
 
 
 def clip(result: str) -> str:
@@ -717,6 +199,7 @@ def run(user_message: str, verbose: bool = True, require_times: bool = False) ->
         truncated=False, steps=0, repeats=0, productive=set(), barren=set(),
         times_retrieved=0,
     )
+    trace.reset()
     seen_calls: dict[str, int] = {}   # exact (tool, args) -> times requested
     barren: dict[str, int] = {}       # tool -> consecutive useless results
     pushed_back = False               # allow exactly one "go do the work"
@@ -764,7 +247,7 @@ def run(user_message: str, verbose: bool = True, require_times: bool = False) ->
                         "pushing back",
                         file=sys.stderr,
                     )
-                trace_event("pushback", step=step, draft=message.content)
+                trace.event("pushback", step=step, draft=message.content)
                 messages.append(message.model_dump(exclude_none=True))
                 messages.append({
                     "role": "user",
@@ -779,7 +262,7 @@ def run(user_message: str, verbose: bool = True, require_times: bool = False) ->
                 })
                 continue
 
-            trace_event("final", step=step, content=message.content)
+            trace.event("final", step=step, content=message.content)
             return message.content or "(empty response)"
 
         # The assistant turn must go into history before the tool results,
@@ -876,7 +359,7 @@ def run(user_message: str, verbose: bool = True, require_times: bool = False) ->
                 if name in SCHEDULE_TOOLS and GTFS_TIME_IN_RESULT.search(str(result)):
                     LAST_RUN["times_retrieved"] += 1
 
-            trace_event(
+            trace.event(
                 "tool_call",
                 step=step,
                 tool=name,
@@ -923,6 +406,20 @@ def run(user_message: str, verbose: bool = True, require_times: bool = False) ->
     )
 
 
+def write_trace(question: str, answer: str = "", extra: dict | None = None):
+    """Thin wrapper so callers don't have to assemble the metadata."""
+    return trace.write(
+        question,
+        answer,
+        provider=providers.current()["name"],
+        model=providers.model(),
+        usage=llm.USAGE,
+        cache_stats=cache.STATS,
+        flags=LAST_RUN,
+        extra=extra,
+    )
+
+
 if __name__ == "__main__":
     question = " ".join(sys.argv[1:]) or "What should I do in Toronto tomorrow?"
     answer = ""
@@ -943,5 +440,5 @@ if __name__ == "__main__":
         sys.exit(1)
     finally:
         path = write_trace(question, answer)
-        print(f"\n[{usage_line()}]", file=sys.stderr)
+        print(f"\n[{llm.usage_line()}]", file=sys.stderr)
         print(f"[trace: {path}]", file=sys.stderr)

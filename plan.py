@@ -24,11 +24,16 @@ import sys
 
 from pydantic import ValidationError
 
-# Import the MODULE, not names from it. `from agent import provider` binds the
-# value at import time, so it never sees switch_provider() reassign it — the
-# footer cheerfully reported "gemini" after failing over to Groq.
+# providers exposes accessors (current(), model(), describe()) rather than
+# module-level values, because failover reassigns the active provider at
+# runtime. `from agent import provider` used to bind the old value forever and
+# this footer reported "gemini" after failing over to Groq. Functions can't go
+# stale, so that class of bug is now structurally impossible.
 import agent
-from agent import call_model, run
+import llm
+import providers
+from agent import run
+from llm import call_model
 from schemas import Itinerary
 
 STRUCTURE_PROMPT = """\
@@ -214,7 +219,7 @@ def main() -> None:
     suffix = f" | {', '.join(flags)}" if flags else ""
 
     print(
-        f"\n[{agent.usage_line()} | steps: {agent.LAST_RUN['steps']}{suffix}]",
+        f"\n[{llm.usage_line()} | steps: {agent.LAST_RUN['steps']}{suffix}]",
         file=sys.stderr,
     )
     print(f"[trace: {trace_path}]", file=sys.stderr)

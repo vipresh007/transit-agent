@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Imported after load_dotenv so the provider list reflects your .env.
-from agent import AVAILABLE  # noqa: E402
+from providers import AVAILABLE  # noqa: E402
 
 import os  # noqa: E402
 

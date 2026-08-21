@@ -12,3 +12,4 @@ data/
 .vscode/
 .cache/
 traces/
+tests/__pycache__/

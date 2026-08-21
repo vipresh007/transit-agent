@@ -44,9 +44,57 @@ this same code.
 
 | File | What's in it |
 |---|---|
-| `agent.py` | The loop. ~60 lines of real logic, no framework. |
-| `tools.py` | Tool functions plus the JSON schemas the model sees. |
-| `.env` | Your key. Gitignored. |
+| `agent.py` | The loop and its guardrails. Start here. |
+| `providers.py` | Which model, failover order, pacing. Accessors, not globals. |
+| `llm.py` | Retries, rate limits, quota, token accounting. |
+| `cache.py` | Replaying identical requests during iteration. |
+| `trace.py` | The JSON record written to `traces/` on every run. |
+| `tools/geo.py` | Geocoding, weather, POIs (external APIs). |
+| `tools/transit.py` | GTFS schema access and stop/trip lookups. |
+| `tools/journey.py` | End-to-end journey planning with transfers. |
+| `tools/registry.py` | Tool schemas + dispatch table. |
+| `schemas.py` | The typed `Itinerary` and its validators. |
+| `plan.py` | Two-phase research → structured itinerary. |
+| `evals.py` | Test suite, plus `--selftest` for the checkers. |
+
+Scripts: `load_gtfs.py` (build the DB), `optimize_db.py` (add indexes),
+`list_models.py` (what your keys can actually use).
+
+## Tests
+
+```bash
+python tests/run_all.py     # everything offline: no API key, no quota
+```
+
+Three suites, all free:
+
+| Suite | Covers |
+|---|---|
+| `tests/test_tools.py` | tool logic, GTFS time arithmetic, SQL guardrails |
+| `tests/test_agent.py` | retries, failover, throttling, the loop's guardrails |
+| `evals.py --selftest` | whether the eval checkers themselves work |
+
+`tests/_harness.py` stubs the OpenAI SDK before any project module loads, so
+the loop runs against a scripted fake model. That's the only way to test
+things like "the model emitted malformed tool-call JSON" or "the provider ran
+out of daily quota mid-conversation" on demand.
+
+Every check in `test_agent.py` corresponds to a bug that actually happened.
+The comments say which.
+
+Not included, because they cost something:
+
+```bash
+python tests/smoke_test.py   # hits Nominatim/Open-Meteo/Overpass
+python evals.py              # spends model quota (~35 requests)
+```
+
+**Why this shape.** `agent.py` and `tools.py` both hit ~950 lines doing five
+jobs each. The split isn't cosmetic: `providers.py` exposes `current()` and
+`model()` as *functions* because failover reassigns the active provider at
+runtime, and the old module-level `provider` variable produced a real bug —
+`from agent import provider` bound the stale value and the footer reported
+the wrong model for a whole run. Functions can't go stale.
 
 ## Free data sources
 

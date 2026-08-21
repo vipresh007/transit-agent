@@ -34,8 +34,10 @@ import sqlite3
 import sys
 import time
 
-import agent
-
+# agent/llm are imported lazily inside main(), not at module scope. They pull
+# in the OpenAI SDK, and --selftest advertises itself as needing no API access
+# — so it must not require the SDK to be installed either. A "free, offline"
+# check that fails on an import is not offline.
 DB = "transit.db"
 
 
@@ -367,6 +369,9 @@ def main() -> None:
               f"(~{len(CASES) * 5} total).")
         return
 
+    import agent   # noqa: PLC0415 — deliberately deferred, see note above
+    import llm     # noqa: PLC0415
+
     selected = args.only or list(CASES)
     print(f"Running {len(selected)} case(s). Estimated ~{len(selected) * 5} requests.\n")
 
@@ -379,7 +384,7 @@ def main() -> None:
         question, build_check = CASES[name]
         expectation, check = build_check()
 
-        before = agent.REQUEST_COUNT["n"]
+        before = llm.USAGE["n"]
         start = time.time()
         try:
             answer = agent.run(question, verbose=False)
@@ -388,7 +393,7 @@ def main() -> None:
             answer, error = "", f"{type(exc).__name__}: {exc}"
 
         elapsed = time.time() - start
-        requests = agent.REQUEST_COUNT["n"] - before
+        requests = llm.USAGE["n"] - before
         passed = bool(answer) and check(answer) and error is None
 
         status = "PASS" if passed else "FAIL"
@@ -415,7 +420,7 @@ def main() -> None:
 
     passed = sum(p for _, p in results)
     print(f"{passed}/{len(results)} passed  "
-          f"({agent.REQUEST_COUNT['n']} requests used)")
+          f"({llm.USAGE['n']} requests used)")
     sys.exit(0 if passed == len(results) else 1)
 
 

@@ -8,11 +8,17 @@ Debugging an agent means separating two questions:
 This script answers (1). It uses no API key and burns no quota. If something
 breaks later, run this first — it tells you which half to look at.
 
-    python smoke_test.py
+    python tests/smoke_test.py
 """
 
 import json
+import os
 import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+os.chdir(ROOT)
 
 import tools
 
