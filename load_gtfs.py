@@ -46,6 +46,12 @@ WANTED = [
 INDEXES = [
     "CREATE INDEX IF NOT EXISTS ix_stop_times_stop ON stop_times(stop_id)",
     "CREATE INDEX IF NOT EXISTS ix_stop_times_trip ON stop_times(trip_id)",
+    # Composite covering indexes for the journey planner's self-join on
+    # stop_times (find all stops downstream of X on the same trip). With only
+    # the single-column indexes above, each interchange search costs ~0.5s and
+    # a full journey search took 17 seconds.
+    "CREATE INDEX IF NOT EXISTS ix_st_trip_seq ON stop_times(trip_id, stop_sequence, stop_id)",
+    "CREATE INDEX IF NOT EXISTS ix_st_stop_trip ON stop_times(stop_id, trip_id, stop_sequence)",
     "CREATE INDEX IF NOT EXISTS ix_trips_route ON trips(route_id)",
     "CREATE INDEX IF NOT EXISTS ix_trips_service ON trips(service_id)",
     "CREATE INDEX IF NOT EXISTS ix_stops_name ON stops(stop_name)",

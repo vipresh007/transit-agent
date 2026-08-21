@@ -73,9 +73,30 @@ def time_variants(hhmmss: str) -> list[str]:
     ]
 
 
+# Models emit typographic punctuation: can’t, don’t, em-dashes, non-breaking
+# spaces. Matching raw ASCII against that produces FALSE NEGATIVES — a passing
+# agent reported as broken. That's the worst failure mode a test suite has,
+# because it trains you to ignore red.
+UNICODE_FIXES = {
+    "’": "'", "‘": "'",      # curly single quotes
+    "“": '"', "”": '"',      # curly double quotes
+    "–": "-", "—": "-",      # en/em dash
+    "‑": "-", "−": "-",      # non-breaking hyphen, minus
+    " ": " ", " ": " ",      # non-breaking spaces
+}
+
+
+def normalize(text: str) -> str:
+    """Flatten formatting so checks test meaning, not typography."""
+    for bad, good in UNICODE_FIXES.items():
+        text = text.replace(bad, good)
+    text = text.lower().replace("*", "").replace("`", "")
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def contains_any(text: str, options: list[str]) -> bool:
-    flat = re.sub(r"\s+", " ", text.lower()).replace("*", "")
-    return any(o.lower() in flat for o in options)
+    flat = normalize(text)
+    return any(normalize(o) in flat for o in options)
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +153,7 @@ def case_subway_lines():
     keys = [n.split("(")[0].strip().lower() for n in names]
     return (
         f"answer mentions all of: {keys}",
-        lambda ans: all(k in ans.lower() for k in keys),
+        lambda ans: all(normalize(k) in normalize(ans) for k in keys),
     )
 
 
@@ -168,13 +189,29 @@ def case_added_service():
 
 def case_refuses_unknown():
     """Calibration: the DB has no fare data. The right answer is 'I can't
-    tell you that', not an invented number. Hallucination check."""
-    return (
-        "answer admits it cannot determine the fare from this data",
-        lambda ans: any(p in ans.lower() for p in
-                        ["don't have", "do not have", "no fare", "cannot",
-                         "can't", "not available", "isn't in", "is not in"]),
-    )
+    tell you that', not an invented number.
+
+    Checked by ABSENCE, not presence. Listing acceptable phrasings failed
+    twice — "can't", then "does not include" — because there are unlimited
+    ways to say "I don't know" and only one way to hallucinate: state a
+    price. Test for the failure mode, not for every spelling of success.
+    """
+    money = re.compile(r"\$\s?\d|\d+\.\d{2}\s*(?:dollars|cad)?|\d+\s*dollars",
+                       re.IGNORECASE)
+
+    def check(ans: str) -> bool:
+        text = normalize(ans)
+        # Any concrete price is a hallucination — the data cannot support one.
+        if money.search(text):
+            return False
+        # And it should actually address the gap, not just dodge the question.
+        return contains_any(ans, [
+            "fare", "price", "cost",
+        ]) and contains_any(ans, [
+            "no ", "not ", "n't", "cannot", "unable", "lack", "absent",
+        ])
+
+    return ("answer names no price and states the data lacks fares", check)
 
 
 CASES = {
@@ -196,11 +233,73 @@ CASES = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Self-test: do the CHECKERS work?
+#
+# We shipped a checker that rejected a correct answer because the model wrote
+# "can’t" with a typographic apostrophe. The agent was right and the suite
+# said FAIL. A suite you can't trust is worse than no suite, so the checkers
+# get their own fixtures — real model phrasings, no API calls.
+# ---------------------------------------------------------------------------
+
+SELFTEST = [
+    # (case, answer text, should_pass)
+    ("no_fare_data",
+     "The GTFS feed does **not** store fare data. Therefore I can’t retrieve "
+     "the adult fare amount from this schedule.", True),
+    ("no_fare_data",
+     "The TTC schedule (GTFS) database contains only route, trip, stop‑time, "
+     "stop, and calendar information—there are no tables or columns for "
+     "fares. Therefore the schedule data does not include the cost.", True),
+    ("no_fare_data",
+     "I don't have fare information in this dataset.", True),
+    ("no_fare_data",
+     "A single TTC adult fare costs $3.35.", False),
+    ("no_fare_data",
+     "The data doesn't list fares, but a single adult fare is 3.35 dollars.",
+     False),  # hedges AND hallucinates — must still fail
+    ("last_501", "The last one departs at 25:23:00.", True),
+    ("last_501", "It leaves at 1:23 AM — scheduled as 25:23 in GTFS.", True),
+    ("last_501", "**1:23 am** from Humber Loop", True),
+    ("last_501", "The last streetcar is at 11:58 PM.", False),
+    ("subway_lines",
+     "The TTC runs Line 1 (Yonge–University), Line 2 (Bloor–Danforth) "
+     "and Line 4 (Sheppard).", True),
+    ("subway_lines", "The TTC runs Line 1 and Line 2.", False),
+]
+
+
+def run_selftest() -> int:
+    print("Checker self-test (no API calls):\n")
+    failures = 0
+    for case_name, answer, should_pass in SELFTEST:
+        _, check = CASES[case_name][1]()
+        got = bool(check(answer))
+        ok = got == should_pass
+        failures += not ok
+        mark = "ok  " if ok else "BAD "
+        print(f"  [{mark}] {case_name:<14} want={should_pass!s:<5} got={got!s:<5} "
+              f"{answer[:52]}...")
+
+    print()
+    if failures:
+        print(f"{failures} checker(s) broken — fix these before trusting any "
+              f"eval result.")
+    else:
+        print("All checkers behave correctly.")
+    return failures
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--only", action="append", help="run specific case(s)")
     parser.add_argument("--list", action="store_true", help="list cases and exit")
+    parser.add_argument("--selftest", action="store_true",
+                        help="test the checkers themselves, no API calls")
     args = parser.parse_args()
+
+    if args.selftest:
+        sys.exit(1 if run_selftest() else 0)
 
     if args.list:
         for name, (question, _) in CASES.items():
@@ -236,14 +335,23 @@ def main() -> None:
         status = "PASS" if passed else "FAIL"
         print(f"[{status}] {name}  ({requests} req, {elapsed:.0f}s)")
         if not passed:
+            # Show enough of the answer to diagnose. 220 chars kept cutting off
+            # before the actual number, which is the only part that matters.
+            body = error or normalize(answer)
             print(f"         expected: {expectation}")
-            print(f"         got:      {error or answer.strip()[:220]}")
+            print(f"         got:      {body[:600]}")
+            if not error and len(body) > 600:
+                print(f"                   ...({len(body) - 600} more chars)")
         print()
 
         results.append((name, passed))
 
-        if error and "Quota" in error:
-            print("Stopping: out of quota.")
+        # A config error fails identically for every case. Stop rather than
+        # burning a request per case to learn the same thing six times.
+        if error and any(k in error for k in ("Quota", "NotFound", "Authentication")):
+            print(f"Stopping: environment problem, not an agent failure.\n"
+                  f"  {error.splitlines()[0]}\n"
+                  f"  Try: python list_models.py")
             break
 
     passed = sum(p for _, p in results)

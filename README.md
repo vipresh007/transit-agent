@@ -80,9 +80,11 @@ run time, not hardcoded, so the suite survives the TTC's six-week republish.
 Includes a hallucination check (asks for fare data the feed doesn't contain)
 and a known-failing case (`calendar_dates` exceptions).
 
-**Stage 3 — structured output**
-Stop returning prose. Define an `Itinerary` Pydantic model (days → legs →
-mode/start/end/cost) and have the agent fill it. Now the output is checkable.
+**Stage 3 — structured output** ✅
+`python plan.py "how do I get from A to B?"`. Two phases: research with tools,
+then a toolless structuring pass that emits JSON validated against the
+`Itinerary` model in `schemas.py`. Validation errors are fed back with the
+offending field named — self-correction against a perfect grader.
 
 **Stage 4 — evaluation**
 Write 15–20 questions with known-correct answers, plus constraint assertions:
