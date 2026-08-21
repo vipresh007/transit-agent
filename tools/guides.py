@@ -43,6 +43,15 @@ RRF_K = 60
 # if you change either.
 MIN_RELEVANCE = float(os.getenv("GUIDES_MIN_RELEVANCE", "0.55"))
 
+# Bands above the floor. Stage 5 returned passages and left the agent to guess
+# whether they were any good — so it treated a 0.56 match exactly like a 0.83
+# one. Naming the quality is what makes the retrieval *agentic*: the agent can
+# only decide to try again if it knows the first attempt went badly.
+#
+# Calibrated on this corpus: on-topic probes scored 0.59-0.83, off-topic 0.48.
+STRONG = 0.70
+MODERATE = 0.62
+
 
 def _unpack(blob: bytes, dims: int) -> list[float]:
     return list(struct.unpack(f"{dims}f", blob))
@@ -173,9 +182,54 @@ def search_guides(query: str, limit: int = 4) -> str:
                 "dense_rank": dense_rank.get(cid),
                 "keyword_rank": sparse_rank.get(cid),
             })
-        return json.dumps(results)
+
+        payload = {
+            "quality": _band(best),
+            "best_score": round(best, 3),
+            "results": results,
+        }
+        if best < MODERATE:
+            payload["advice"] = (
+                "These matches are weak. Your wording may not appear in the "
+                "guides. Try ONE more search using the vocabulary the corpus "
+                "actually uses — see suggested_terms — then work with whatever "
+                "you get. Do not search a third time."
+            )
+            payload["suggested_terms"] = _suggest_terms(conn, ranked[:8])
+        return json.dumps(payload)
     finally:
         conn.close()
+
+
+def _band(score: float) -> str:
+    if score >= STRONG:
+        return "strong"
+    return "moderate" if score >= MODERATE else "weak"
+
+
+def _suggest_terms(conn, candidate_ids: list[int]) -> list[str]:
+    """Vocabulary the corpus actually uses, drawn from nearby section headings.
+
+    Query rewriting works far better when the rewrite is grounded in the
+    corpus than when the model free-associates. "Rainy" appears zero times in
+    these guides; "indoor", "museum" and "gallery" appear constantly. Handing
+    over real headings turns "try different words" into a concrete move.
+    """
+    if not candidate_ids:
+        return []
+    marks = ",".join("?" * len(candidate_ids))
+    rows = conn.execute(
+        f"SELECT DISTINCT heading FROM chunks WHERE id IN ({marks})",
+        candidate_ids,
+    ).fetchall()
+
+    terms: list[str] = []
+    for (heading,) in rows:
+        for part in heading.split(" > "):
+            part = part.strip()
+            if part and part.lower() != "introduction" and part not in terms:
+                terms.append(part)
+    return terms[:8]
 
 
 def compare_retrievers(query: str, limit: int = 3) -> dict:

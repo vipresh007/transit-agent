@@ -30,6 +30,7 @@ from pydantic import ValidationError
 # this footer reported "gemini" after failing over to Groq. Functions can't go
 # stale, so that class of bug is now structurally impossible.
 import agent
+import grounding
 import llm
 import providers
 from agent import run
@@ -164,7 +165,8 @@ def main() -> None:
     )
 
     print(f"Researching: {question}\n", file=sys.stderr)
-    research = run(question + RESEARCH_SUFFIX, require_times=True)
+    research = run(question + RESEARCH_SUFFIX, require_times=True,
+                   require_grounding=True)
 
     truncated = agent.LAST_RUN["truncated"]
     # The load-bearing check: did a real CLOCK TIME ever come back from the
@@ -199,6 +201,15 @@ def main() -> None:
 
     print(itinerary.render())
 
+    # Grounding: do the answer's specifics trace to what the tools returned?
+    # RAG improves the material a model works from; it does not stop it
+    # embellishing. This catches invented specifics — the failure mode that
+    # actually matters, since a wrong street name or price is actionable.
+    sources = [e["result"] for e in agent.trace.EVENTS if e["kind"] == "tool_call"]
+    ground = grounding.check(itinerary.render(), sources)
+    if ground["unsupported"]:
+        print(f"\n  [grounding] {grounding.summary(ground)}", file=sys.stderr)
+
     trace_path = agent.write_trace(
         question,
         answer=itinerary.render(),
@@ -207,6 +218,7 @@ def main() -> None:
             "itinerary": itinerary.model_dump(),
             "connection_gaps_min": itinerary.connection_gaps(),
             "phase": "plan",
+            "grounding": ground,
         },
     )
     flags = []

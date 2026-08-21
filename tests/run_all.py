@@ -2,10 +2,11 @@
 
     python tests/run_all.py
 
-Three suites:
-    test_tools    tool logic + SQL against transit.db
-    test_agent    loop mechanics with a scripted fake model
-    evals         --selftest, i.e. do the eval checkers themselves work
+Four suites:
+    test_tools     tool logic + SQL against transit.db
+    test_agent     loop mechanics with a scripted fake model
+    test_grounding whether an answer's specifics trace to its sources
+    evals          --selftest, i.e. do the eval checkers themselves work
 
 Deliberately excluded: smoke_test.py (hits live APIs) and the eval suite
 proper (spends model quota). Run those on purpose, not by habit.
@@ -21,6 +22,7 @@ ROOT = HERE.parent
 SUITES = [
     ("tool logic", [sys.executable, str(HERE / "test_tools.py")], HERE),
     ("agent loop", [sys.executable, str(HERE / "test_agent.py")], HERE),
+    ("grounding", [sys.executable, str(HERE / "test_grounding.py")], HERE),
     ("eval checkers", [sys.executable, str(ROOT / "evals.py"), "--selftest"], ROOT),
 ]
 

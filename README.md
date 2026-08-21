@@ -160,11 +160,23 @@ ablation. On this corpus the two retrievers pick different top results on 5 of
 9 probes — dense alone answered "somewhere to eat late at night" with a bed &
 breakfast section, having latched onto "night".
 
-**Stage 6 — agentic RAG**
-The interesting one. The agent must decide *whether* to retrieve: "what's
-worth seeing in Kensington Market?" needs the guide; "when's the last
-streetcar?" needs GTFS. Then let it rewrite its own query and retry when
-retrieval comes back thin. Compare against stage 5 on the same evals.
+**Stage 6 — agentic RAG** ✅
+`search_guides` now reports a quality band (strong / moderate / weak /
+nothing-relevant) plus `suggested_terms` drawn from real section headings, so
+the agent can react to bad retrieval instead of treating a 0.56 match like a
+0.83 one. `grounding.py` checks whether an answer's specifics trace back to
+what the tools returned, and `agent.py` pushes back once if they don't.
+
+The honest finding: query rewriting earned less than expected. Asked about a
+"rainy day" — a phrase appearing zero times in the corpus — the model expanded
+to "museum gallery indoor attractions" on its own and scored 0.74 first try.
+Modern models do query expansion natively.
+
+Grounding earned much more. That same run named nine venues found nowhere in
+the retrieved text (Eaton Centre, Mirvish, Yorkdale...) and closed with "all
+of the venues above are listed in the Wikivoyage guides, so you can trust the
+opening-hour details". Inventing venues is bad; asserting a source for the
+invention is worse, and it's why `PROVENANCE_CLAIM` exists.
 
 **Stage 7 — self-correction & replanning**
 Feed it constraint violations from stage 4 and make it fix its own itinerary.

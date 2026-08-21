@@ -238,9 +238,84 @@ def test_result_clipping():
         check(f"barren({text[:28]!r})", agent._is_barren(text), barren)
 
 
+
+
+def test_grounding_pushback():
+    section("grounding pushback")
+
+    # Reproduces a real run: the agent listed nine Toronto venues found
+    # nowhere in the retrieved passages, then closed with "all of the venues
+    # above are listed in the Wikivoyage guides, so you can trust the
+    # opening-hour details". Inventing venues is bad; asserting that the
+    # invention came from a source is worse.
+    retrieved = ('[{"article":"Toronto","section":"See > Museums",'
+                 '"text":"The Art Gallery of Ontario holds Canadian works. '
+                 'The Royal Ontario Museum covers natural history."}]')
+    bad = ("Visit the Art Gallery of Ontario, the Royal Ontario Museum, "
+           "Eaton Centre, Yorkdale Shopping Centre and Casa Loma. "
+           "All of these are listed in the Wikivoyage guides.")
+    good = ("Visit the Art Gallery of Ontario or the Royal Ontario Museum. "
+            "The guides don't cover other indoor options.")
+
+    script = [calls(("search_guides", {"query": "indoor"})), says(bad), says(good)]
+    fake, td = fresh(script, {"search_guides": lambda **k: retrieved})
+    with td:
+        out = agent.run("rainy day?", verbose=False, require_grounding=True)
+    check("ungrounded answer is rejected", out, good)
+    check("coverage was recorded", agent.LAST_RUN["grounding"] is not None)
+
+    # A well-grounded answer must pass straight through.
+    script = [calls(("search_guides", {"query": "museums"})), says(good)]
+    fake, td = fresh(script, {"search_guides": lambda **k: retrieved})
+    with td:
+        out = agent.run("museums?", verbose=False, require_grounding=True)
+    check("grounded answer passes first time", out, good)
+    check("only two model calls needed", fake.chat.completions.create.call_count, 2)
+
+    # Pushback fires once; a model that ignores it must still terminate.
+    script = [calls(("search_guides", {"query": "x"}))] + [says(bad)] * 6
+    fake, td = fresh(script, {"search_guides": lambda **k: retrieved})
+    with td:
+        out = agent.run("rainy day?", verbose=False, require_grounding=True)
+    check("pushback does not loop", out, bad)
+
+    # Off by default: journey answers cite the schedule tool, not the guides.
+    script = [says(bad)]
+    fake, td = fresh(script, {})
+    with td:
+        out = agent.run("anything?", verbose=False)
+    check("no pushback when not requested", out, bad)
+
+
+def test_retrieval_telemetry():
+    section("retrieval telemetry")
+
+    weak = '{"quality":"weak","best_score":0.57,"results":[],"suggested_terms":["See","Museums"]}'
+    strong = '{"quality":"strong","best_score":0.81,"results":[]}'
+
+    script = [calls(("search_guides", {"query": "rainy day"})),
+              calls(("search_guides", {"query": "indoor museums"})),
+              says("Try the museums.")]
+    seq = iter([weak, strong])
+    fake, td = fresh(script, {"search_guides": lambda **k: next(seq)})
+    with td:
+        agent.run("rainy day?", verbose=False)
+    check("counts searches", agent.LAST_RUN["searches"], 2)
+    check("records that it re-queried", agent.LAST_RUN["rewrote_query"])
+    check("tracks the best score seen", agent.LAST_RUN["best_retrieval"], 0.81)
+
+    script = [calls(("search_guides", {"query": "kensington"})), says("ok")]
+    fake, td = fresh(script, {"search_guides": lambda **k: strong})
+    with td:
+        agent.run("kensington?", verbose=False)
+    check("a single strong search is not a rewrite",
+          agent.LAST_RUN["rewrote_query"], False)
+
+
 if __name__ == "__main__":
     for fn in (test_retry_and_quota, test_failover, test_loop_guards,
-               test_verification_guards, test_result_clipping):
+               test_verification_guards, test_result_clipping,
+               test_grounding_pushback, test_retrieval_telemetry):
         fn()
     from _harness import PASSED
     print(f"\n{PASSED['n']} checks passed")

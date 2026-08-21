@@ -37,6 +37,7 @@ from openai import NotFoundError
 load_dotenv()
 
 import cache
+import grounding
 import llm
 import providers
 import trace
@@ -55,6 +56,10 @@ Today's date is {TODAY:%A, %d %B %Y} ({TODAY:%Y%m%d} in GTFS format).
 Tools available: geocoding, weather, points of interest, a SQL database of
 the real TTC schedule, and Wikivoyage travel guides.
 
+Use them rather than guessing. You do not know today's weather, whether a
+museum is open, or when the last streetcar runs, and inventing those details
+makes you useless.
+
 CHOOSING BETWEEN THE SCHEDULE AND THE GUIDES — get this right first:
   "when", "how do I get to", "what time", "which route"  -> plan_journey /
       query_transit. The schedule is authoritative and the guides are not.
@@ -66,9 +71,21 @@ CHOOSING BETWEEN THE SCHEDULE AND THE GUIDES — get this right first:
 Do not call search_guides for a departure time — it returns prose, and prose
 that sounds confident about a time is exactly how wrong answers happen.
 
-Use them rather than guessing. You do not know today's weather, whether a
-museum is open, or when the last streetcar runs, and inventing those details
-makes you useless.
+REACT TO RETRIEVAL QUALITY. search_guides reports a "quality" field:
+  strong    use the passages, move on
+  moderate  usable; don't search again just to feel more certain
+  weak      your wording probably isn't in the guides. Search ONCE more using
+            the "suggested_terms" it returns — those are real section
+            headings from the corpus. Then work with whatever you get.
+  nothing relevant  say so. Do not dress a weak match up as an answer.
+
+Rewrite toward the corpus, not toward synonyms you like. "Rainy day" appears
+nowhere in these guides; "indoor", "museum" and "gallery" appear constantly.
+Two searches is the limit — a third means the corpus doesn't cover it.
+
+GROUND YOUR PROSE. State specifics — street names, venues, prices — only if
+they appeared in a tool result. General impressions are fine; invented
+particulars are not, and they're the ones a reader will act on.
 
 For a journey between two places, do exactly this:
   1. geocode each place to get coordinates
@@ -147,6 +164,10 @@ LAST_RUN = {
     "productive": set(),   # tools that returned real data
     "barren": set(),       # tools that only ever errored or came back empty
     "times_retrieved": 0,  # tool results that actually contained clock times
+    "searches": 0,         # how many times the guides were queried
+    "best_retrieval": 0.0, # best similarity seen across those searches
+    "rewrote_query": False,# did it re-query after a weak result?
+    "grounding": None,     # coverage report for the final answer
 }
 
 # "Did query_transit return rows?" turned out to be the wrong question. A run
@@ -201,19 +222,38 @@ def _is_barren(result: str) -> bool:
     )
 
 
-def run(user_message: str, verbose: bool = True, require_times: bool = False) -> str:
+# Phrases that claim provenance. An answer may cheerfully invent venues; the
+# genuinely dangerous move is telling the reader those inventions came from a
+# source. One real run listed nine venues found nowhere in the corpus and
+# closed with "all of the venues above are listed in the Wikivoyage guides,
+# so you can trust the opening-hour details".
+PROVENANCE_CLAIM = re.compile(
+    r"\b(?:listed in|according to|from|per|sourced from|based on|found in)\b"
+    r"[^.]{0,40}\b(?:the )?(?:guides?|wikivoyage|schedule|data|sources?)\b",
+    re.IGNORECASE,
+)
+
+# Below this fraction of grounded specifics, an answer is substantially the
+# model's own knowledge wearing a retrieved-looking costume.
+MIN_GROUNDING = float(os.getenv("MIN_GROUNDING", "0.85"))
+
+
+def run(user_message: str, verbose: bool = True, require_times: bool = False,
+        require_grounding: bool = False) -> str:
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_message},
     ]
     LAST_RUN.update(
         truncated=False, steps=0, repeats=0, productive=set(), barren=set(),
-        times_retrieved=0,
+        times_retrieved=0, searches=0, best_retrieval=0.0, rewrote_query=False,
+        grounding=None,
     )
     trace.reset()
     seen_calls: dict[str, int] = {}   # exact (tool, args) -> times requested
     barren: dict[str, int] = {}       # tool -> consecutive useless results
     pushed_back = False               # allow exactly one "go do the work"
+    grounding_pushed = False          # and exactly one "cite what you retrieved"
 
     for step in range(MAX_STEPS):
         remaining = MAX_STEPS - step
@@ -272,6 +312,48 @@ def run(user_message: str, verbose: bool = True, require_times: bool = False) ->
                     ),
                 })
                 continue
+
+            # Grounding pushback. Same shape as the times check: verify a
+            # precondition in CODE before accepting an answer, because the
+            # prompt already asked for this and the model complied only
+            # partially. Fires once, then we accept what we get.
+            draft = message.content or ""
+            if require_grounding and not grounding_pushed and draft:
+                sources = [e["result"] for e in trace.EVENTS
+                           if e["kind"] == "tool_call"]
+                report = grounding.check(draft, sources)
+                LAST_RUN["grounding"] = report
+                claims_provenance = bool(PROVENANCE_CLAIM.search(draft))
+                thin = report["claims"] >= 5 and report["coverage"] < MIN_GROUNDING
+
+                if sources and (thin or (claims_provenance and report["unsupported"])):
+                    grounding_pushed = True
+                    if verbose:
+                        print(f"  [!] grounding {report['coverage']:.0%} — "
+                              f"pushing back on {len(report['unsupported'])} "
+                              f"unsupported specifics", file=sys.stderr)
+                    trace.event("grounding_pushback", step=step,
+                                coverage=report["coverage"],
+                                unsupported=report["unsupported"])
+                    messages.append(message.model_dump(exclude_none=True))
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Stop. These specifics appear nowhere in the tool "
+                            "results you were given:\n\n  "
+                            + ", ".join(report["unsupported"][:15])
+                            + "\n\nThey came from your own knowledge, not from "
+                            "the retrieved sources. Rewrite so that every named "
+                            "venue, street, price and time is one you actually "
+                            "retrieved. Drop the rest — a shorter sourced "
+                            "answer is worth more than a long one that mixes "
+                            "retrieval with recall.\n\n"
+                            "And do NOT claim the guides are the source for "
+                            "anything you did not retrieve from them. If you "
+                            "add general knowledge, label it as such."
+                        ),
+                    })
+                    continue
 
             trace.event("final", step=step, content=message.content)
             return message.content or "(empty response)"
@@ -370,6 +452,27 @@ def run(user_message: str, verbose: bool = True, require_times: bool = False) ->
                 if name in SCHEDULE_TOOLS and GTFS_TIME_IN_RESULT.search(str(result)):
                     LAST_RUN["times_retrieved"] += 1
 
+            # Retrieval telemetry. Stage 6 is about the agent REACTING to weak
+            # results, and "did it react?" is only answerable if we record
+            # both the quality it saw and whether it searched again.
+            if name == "search_guides":
+                if LAST_RUN["searches"]:
+                    LAST_RUN["rewrote_query"] = True
+                LAST_RUN["searches"] += 1
+                try:
+                    payload = json.loads(str(result))
+                    # Must be a dict: "nothing relevant" is prose, and older
+                    # result shapes were bare lists. Telemetry crashing the
+                    # run would be a spectacular own goal — it exists to
+                    # observe the run, not to end it.
+                    if isinstance(payload, dict):
+                        LAST_RUN["best_retrieval"] = max(
+                            LAST_RUN["best_retrieval"],
+                            float(payload.get("best_score", 0.0)),
+                        )
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    pass
+
             trace.event(
                 "tool_call",
                 step=step,
@@ -435,7 +538,7 @@ if __name__ == "__main__":
     question = " ".join(sys.argv[1:]) or "What should I do in Toronto tomorrow?"
     answer = ""
     try:
-        answer = run(question)
+        answer = run(question, require_grounding=True)
         print(answer)
     except DailyQuotaExhausted as exc:
         print(f"\n{exc}", file=sys.stderr)
