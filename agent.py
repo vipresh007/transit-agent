@@ -556,12 +556,23 @@ CACHE_DIR = Path(os.getenv("CACHE_DIR", ".cache"))
 CACHE_STATS = {"hits": 0, "misses": 0}
 
 
+# The tool schemas are part of every request, so they must be part of the key.
+# Keying on a bare `use_tools` boolean meant editing a tool's description or
+# parameters left the cache happily replaying answers from the old tools —
+# I changed plan_journey's signature, reran, and got a byte-identical stale
+# result. A cache must be keyed on the ENTIRE request, not the parts that
+# were convenient to hash.
+TOOLS_FINGERPRINT = hashlib.sha256(
+    json.dumps(TOOL_SCHEMAS, sort_keys=True).encode()
+).hexdigest()[:12]
+
+
 def _cache_key(model: str, messages: list, use_tools: bool) -> str:
     blob = json.dumps(
         {
             "model": model,
             "messages": messages,
-            "tools": use_tools,
+            "tools": TOOLS_FINGERPRINT if use_tools else None,
             "temperature": TEMPERATURE,
         },
         sort_keys=True,

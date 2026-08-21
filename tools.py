@@ -407,6 +407,66 @@ def find_direct_trips(
     ])
 
 
+def _shift(t: str, minutes: int) -> str:
+    """Shift a GTFS time by minutes, keeping 24+ hour notation.
+
+    Clamped at zero: walking back 5 minutes from a 00:02 departure produced
+    '-1:57:00', which is not a time and fails schema validation. Rare, but
+    a 00:02 departure is exactly the kind of input nobody tests by hand.
+    """
+    h, m, s = (int(p) for p in t.split(":"))
+    total = max(0, h * 3600 + m * 60 + s + minutes * 60)
+    return f"{total // 3600:02d}:{(total % 3600) // 60:02d}:{total % 60:02d}"
+
+
+def _with_walks(option: dict, origin_name: str, dest_name: str) -> dict:
+    """Add fully-labelled walking legs at both ends.
+
+    Returning bare distances made the model invent the labels, and it got
+    them backwards: a final leg reading "Distillery Loop -> Kensington
+    Market". Anything the model has to reconstruct, it can reconstruct wrong.
+    Emitting complete legs turns a reasoning step into transcription.
+    """
+    legs = option["legs"]
+    walk_in = max(1, round(option["walk_to_stop_m"] / 75))
+    walk_out = max(1, round(option["walk_from_stop_m"] / 75))
+
+    # Interleave the transfer walk too, so every minute of the journey is an
+    # explicit leg and nothing has to be inferred.
+    middle = []
+    for i, leg in enumerate(legs):
+        middle.append({**leg, "mode": "transit"})
+        if i == 0 and len(legs) > 1:
+            middle.append({
+                "mode": "walk", "route": None,
+                "from": leg["to"], "to": legs[1]["from"],
+                "depart": leg["arrive"],
+                "arrive": _shift(leg["arrive"], option["transfer_walk_min"]),
+                "metres": option["transfer_walk_m"],
+            })
+
+    option["legs"] = [
+        {
+            "mode": "walk", "route": None,
+            "from": origin_name, "to": legs[0]["from"],
+            "depart": _shift(legs[0]["depart"], -walk_in),
+            "arrive": legs[0]["depart"],
+            "metres": option["walk_to_stop_m"],
+        },
+        *middle,
+        {
+            "mode": "walk", "route": None,
+            "from": legs[-1]["to"], "to": dest_name,
+            "depart": legs[-1]["arrive"],
+            "arrive": _shift(legs[-1]["arrive"], walk_out),
+            "metres": option["walk_from_stop_m"],
+        },
+    ]
+    option["depart"] = option["legs"][0]["depart"]
+    option["arrive"] = option["legs"][-1]["arrive"]
+    return option
+
+
 def _direct_leg(conn, origin: str, dest: str, after: str, service_id: str):
     """One scheduled ride from origin to dest, or None."""
     return conn.execute(
@@ -435,6 +495,8 @@ def plan_journey(
     dest_lon: float,
     after_time: str = "08:00:00",
     service_id: str = "1",
+    origin_name: str = "origin",
+    dest_name: str = "destination",
 ) -> str:
     """Find a real journey between two coordinates: direct, or one transfer.
 
@@ -493,7 +555,8 @@ def plan_journey(
                     })
         if direct:
             direct.sort(key=lambda j: j["legs"][0]["arrive"])
-            return json.dumps(direct[:3])
+            return json.dumps([_with_walks(o, origin_name, dest_name)
+                               for o in direct[:3]])
 
         # --- 2. one transfer -------------------------------------------------
         interchange_sql = """
@@ -570,7 +633,8 @@ def plan_journey(
             )
 
         options.sort(key=lambda j: j["legs"][-1]["arrive"])
-        return json.dumps(options[:3])
+        return json.dumps([_with_walks(o, origin_name, dest_name)
+                           for o in options[:3]])
     finally:
         conn.close()
 
@@ -801,6 +865,15 @@ TOOL_SCHEMAS = [
                     "service_id": {
                         "type": "string",
                         "description": "'1' weekday, '2' Saturday, '3' Sunday.",
+                    },
+                    "origin_name": {
+                        "type": "string",
+                        "description": "What the user called the origin, e.g. "
+                        "'Kensington Market'. Used to label the walking legs.",
+                    },
+                    "dest_name": {
+                        "type": "string",
+                        "description": "What the user called the destination.",
                     },
                 },
                 "required": ["origin_lat", "origin_lon", "dest_lat", "dest_lon"],

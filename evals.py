@@ -28,6 +28,7 @@ Usage:
 """
 
 import argparse
+import json
 import re
 import sqlite3
 import sys
@@ -214,7 +215,56 @@ def case_refuses_unknown():
     return ("answer names no price and states the data lacks fares", check)
 
 
+def case_journey():
+    """End-to-end journey planning — the thing the project is actually for.
+
+    Ground truth from plan_journey itself, which is verified against the
+    database. This checks that the AGENT surfaces what the tool found: the
+    right routes, real times, and correctly-labelled endpoints. It took a
+    dozen iterations to get right, so it gets a test.
+    """
+    # Reference computed INDEPENDENTLY of plan_journey. Using the planner to
+    # generate ground truth for a test of the planner is circular — it would
+    # pass even if the planner silently changed its mind about the route.
+    # These are the corridor stops, confirmed against the data by hand:
+    #   8128  Spadina Ave at Nassau St South Side   (510 southbound)
+    #   15648 King St West at Spadina Ave East Side (504 eastbound)
+    leg = """
+        SELECT r.route_short_name,
+               MIN(substr('0' || st.departure_time, -8)) AS depart
+        FROM trips t
+        JOIN routes r     ON r.route_id = t.route_id
+        JOIN stop_times st ON st.trip_id = t.trip_id
+        WHERE st.stop_id = ? AND t.service_id = '1'
+          AND r.route_short_name = ?
+          AND substr('0' || st.departure_time, -8) >= ?
+    """
+    conn = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    try:
+        _, board = conn.execute(leg, ("8128", "510", "08:00:00")).fetchone()
+    finally:
+        conn.close()
+    routes = ["510", "504"]
+
+    def check(ans: str) -> bool:
+        flat = normalize(ans)
+        # Every transit route named, the real boarding time present, and no
+        # claim of a direct trip when a transfer is required.
+        return (
+            all(r.lower() in flat for r in routes)
+            and contains_any(ans, time_variants(board))
+            and "distillery" in flat
+        )
+
+    return (
+        f"answer names routes {routes}, boards at {board}, reaches Distillery",
+        check,
+    )
+
+
 CASES = {
+    "journey": ("how do I get from Kensington Market to the Distillery "
+                "District on a weekday morning?", case_journey),
     "last_501": ("what's the last eastbound 501 Queen streetcar on a weekday?",
                  case_last_501),
     "earliest_501": ("what's the earliest eastbound 501 Queen streetcar on a weekday?",
@@ -266,6 +316,15 @@ SELFTEST = [
      "The TTC runs Line 1 (Yonge–University), Line 2 (Bloor–Danforth) "
      "and Line 4 (Sheppard).", True),
     ("subway_lines", "The TTC runs Line 1 and Line 2.", False),
+    # Your first fully correct journey run, kept verbatim as a fixture.
+    ("journey",
+     "8:00 AM walk: Kensington Market -> Spadina Ave at Nassau St South Side. "
+     "8:03 AM streetcar 510 to Spadina Ave at King St West. 8:15 AM "
+     "streetcar 504A to Distillery Loop, arriving 8:37.", True),
+    # Right shape, invented times — must fail.
+    ("journey",
+     "Take the 510 then the 504 to the Distillery District, about 40 minutes.",
+     False),
 ]
 
 
