@@ -272,10 +272,16 @@ def main() -> None:
     print(f"\n[{llm.usage_line()} | {len(tasks)} subtasks | {elapsed:.0f}s]",
           file=sys.stderr)
 
+    # EVENTS is thread-local, and the subagents filled THEIR threads' copies.
+    # Writing from here without merging gave a trace with zero events and a
+    # 0.0s wall clock next to 321s of generating.
+    merged = sorted((e for r in results for e in r["events"]),
+                    key=lambda e: float(e["t"]))
     path = trace.write(
         question, answer,
         provider=providers.current()["name"], model=providers.model(),
         usage=llm.USAGE, cache_stats={}, flags={"subtasks": len(tasks)},
+        events=merged, wall_seconds=elapsed,
         extra={
             "phase": "crew",
             "subtasks": [

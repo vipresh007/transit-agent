@@ -2,7 +2,7 @@
 
     python tests/run_all.py
 
-Nine suites:
+Ten suites:
     test_imports   static: do all imports resolve, no dangling references
     test_tools     tool logic + SQL against transit.db
     test_agent     loop mechanics with a scripted fake model
@@ -10,6 +10,7 @@ Nine suites:
     test_constraints whether an itinerary is actually possible
     test_memory    what persists between sessions, and what must not
     test_crew      decomposition, concurrent subagents, synthesis
+    test_streaming live observers + the plan()/UI split
     test_graph     the LangGraph port — skips if langgraph isn't installed
     evals          --selftest, i.e. do the eval checkers themselves work
 
@@ -34,6 +35,7 @@ SUITES = [
     ("constraints", [sys.executable, str(HERE / "test_constraints.py")], HERE),
     ("memory", [sys.executable, str(HERE / "test_memory.py")], HERE),
     ("crew", [sys.executable, str(HERE / "test_crew.py")], HERE),
+    ("streaming/UI", [sys.executable, str(HERE / "test_streaming.py")], HERE),
     ("langgraph port", [sys.executable, str(HERE / "test_graph.py")], HERE),
     ("eval checkers", [sys.executable, "-m", "transit.pipeline.evals", "--selftest"], ROOT),
 ]

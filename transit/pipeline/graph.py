@@ -336,10 +336,15 @@ def report(question: str, state: dict, tid: str, elapsed: float) -> None:
     print(f"\n[{llm.usage_line()} | {len(results)} subtasks | {elapsed:.0f}s "
           f"| thread {tid}]", file=sys.stderr)
 
+    # Same thread-local merge crew.py needs — LangGraph runs the research
+    # nodes on a pool, so each one's events live on a different thread.
+    merged = sorted((e for r in results for e in r["events"]),
+                    key=lambda e: float(e["t"]))
     path = trace.write(
         question, answer,
         provider=providers.current()["name"], model=providers.model(),
         usage=llm.USAGE, cache_stats={}, flags={"subtasks": len(results)},
+        events=merged, wall_seconds=elapsed,
         extra={
             "phase": "graph",
             "thread_id": tid,

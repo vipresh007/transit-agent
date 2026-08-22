@@ -8,3 +8,6 @@ pydantic>=2.9.0
 # nothing else imports langgraph and every other suite runs without it.
 langgraph
 langgraph-checkpoint-sqlite
+
+# UI only (optional). Nothing in transit/ imports it.
+streamlit

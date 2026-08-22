@@ -38,6 +38,7 @@ Layers, not alternatives — each calls the one below. Pick one per question.
 | `python plan.py "..."` | one A-to-B journey | typed itinerary, constraint checks, repair, memory |
 | `python crew.py "..."` | several *independent* questions | parallel subagents + synthesis |
 | `python graph.py "..."` | same as crew, via LangGraph | checkpointing, approval pauses |
+| `streamlit run ui.py` | you want to watch it work | live tool calls, itinerary table, badges |
 
 `crew.py` and `graph.py` call `agent.run()` directly, so they skip the typing
 and schedule verification `plan.py` adds — their answers are grounded but not
@@ -59,6 +60,7 @@ transit/
   tools/        geo, transit, journey, guides, memory, registry
   verify/       constraints, grounding, schemas
   pipeline/     plan, crew, graph, evals
+ui.py           Streamlit front end (optional)
 scripts/        load_gtfs, load_guides, optimize_db, list_models, timing
 data/           databases and downloads (gitignored)
 tests/

@@ -21,6 +21,7 @@ pattern you'll build in this project.
 import json
 import re
 import sys
+from dataclasses import dataclass, field
 
 from pydantic import ValidationError
 
@@ -245,23 +246,62 @@ def repair(itinerary, violations, prefs, rounds: int = 2, verbose: bool = True,
 
     return itinerary, violations
 
+@dataclass
+class PlanResult:
+    """Everything a caller needs, with nothing printed.
 
-def _plan() -> None:
-    question = " ".join(sys.argv[1:]) or (
-        "How do I get from Kensington Market to the Distillery District "
-        "on a weekday morning?"
-    )
-    # Environment first, then memory fills the gaps. Precedence matters: what
-    # the traveller says NOW must beat what they said last week, or stored
-    # memory becomes impossible to escape without editing a database.
-    prefs = constraints.Preferences.from_env()
+    _plan() used to be one 140-line function that computed and printed in the
+    same breath, which was fine while stdout was the only consumer. A second
+    consumer — the Streamlit UI — could only get at the results by
+    reimplementing the pipeline, and a reimplementation drifts. Every fix
+    would have to be made twice, and the second copy would silently rot.
+
+    So: one pipeline that returns, two presentations that print. `flags` is
+    computed here rather than by each caller for the same reason — the rule
+    for when an itinerary counts as UNVERIFIED is a property of the result,
+    not of how you happen to be displaying it.
+    """
+
+    question: str
+    research: str
+    prefs: constraints.Preferences
+    remembered: list
+    itinerary: object | None = None
+    violations: list = field(default_factory=list)
+    grounding: dict = field(default_factory=dict)
+    sources: list = field(default_factory=list)
+    truncated: bool = False
+    no_schedule_data: bool = False
+    steps: int = 0
+    repeats: int = 0
+    trace_path: object | None = None
+    error: str | None = None
+
+    @property
+    def flags(self) -> list:
+        out = []
+        if self.error:
+            out.append("FAILED")
+        elif self.itinerary is not None and not self.itinerary.feasible:
+            out.append("NO ROUTE")
+        elif self.no_schedule_data:
+            out.append("UNVERIFIED TIMES")
+        if self.truncated:
+            out.append("TRUNCATED")
+        if self.repeats:
+            out.append(f"{self.repeats} blocked repeats")
+        return out
+
+
+def plan(question: str, prefs: constraints.Preferences | None = None,
+         verbose: bool = True, record: bool = True) -> PlanResult:
+    """Research, structure, verify, repair. Returns; does not print."""
+    if prefs is None:
+        # Environment first, then memory fills the gaps. Precedence matters:
+        # what the traveller says NOW must beat what they said last week, or
+        # stored memory becomes impossible to escape without editing a database.
+        prefs = constraints.Preferences.from_env()
     prefs, remembered = memory.apply_to(prefs)
-
-    print(f"Researching: {question}", file=sys.stderr)
-    print(f"Constraints: {prefs.describe()}", file=sys.stderr)
-    if remembered:
-        print(f"  (from memory: {', '.join(remembered)})", file=sys.stderr)
-    print(file=sys.stderr)
 
     # State the constraints up front as well as checking them afterwards.
     # Verification alone would work, but every violation costs a repair round,
@@ -269,121 +309,135 @@ def _plan() -> None:
     research = run(
         question + RESEARCH_SUFFIX
         + f"\n\nThe traveller's constraints: {prefs.describe()}.",
-        require_times=True, require_grounding=True,
+        require_times=True, require_grounding=True, verbose=verbose,
     )
 
-    truncated = agent.LAST_RUN["truncated"]
-    # The load-bearing check: did a real CLOCK TIME ever come back from the
-    # database? Checking "did query_transit return rows" was too weak -- a run
-    # that only looked up a service_id passed it while inventing every
-    # departure. Check for the thing you actually need, not a proxy for it.
-    no_schedule_data = agent.LAST_RUN["times_retrieved"] == 0
+    result = PlanResult(
+        question=question, research=research, prefs=prefs,
+        remembered=remembered,
+        truncated=agent.LAST_RUN["truncated"],
+        # The load-bearing check: did a real CLOCK TIME ever come back from
+        # the database? "Did query_transit return rows" was too weak — a run
+        # that only looked up a service_id passed it while inventing every
+        # departure. Check for the thing you need, not a proxy for it.
+        no_schedule_data=agent.LAST_RUN["times_retrieved"] == 0,
+        steps=agent.LAST_RUN["steps"],
+        repeats=agent.LAST_RUN["repeats"],
+    )
 
-    if no_schedule_data:
-        print(
-            "\n  [!] NO successful schedule query — every time in this "
-            "itinerary is an estimate",
-            file=sys.stderr,
-        )
-    elif truncated:
-        print(
-            "\n  [!] research was truncated — the itinerary will be marked "
-            "as partly unverified",
-            file=sys.stderr,
-        )
-
-    print("\nStructuring...\n", file=sys.stderr)
     try:
-        itinerary = structure(
-            research, truncated=truncated, no_schedule_data=no_schedule_data
+        result.itinerary = structure(
+            research, truncated=result.truncated,
+            no_schedule_data=result.no_schedule_data, verbose=verbose,
         )
     except ValueError as exc:
-        print(f"\n{exc}", file=sys.stderr)
-        print("\nFalling back to the research notes:\n")
-        print(research)
-        sys.exit(1)
+        result.error = str(exc)
+        return result
 
-    # Constraint verification against the real schedule. Pydantic checked the
-    # SHAPE of this itinerary; this checks whether it could actually happen.
-    # Harvest the research phase's tool results now: repair rounds call run()
+    # Harvest the research phase's tool results NOW: repair rounds call run()
     # again, which resets the trace.
-    sources = [e["result"] for e in agent.trace.EVENTS if e["kind"] == "tool_call"]
+    result.sources = [e["result"] for e in agent.trace.EVENTS
+                      if e["kind"] == "tool_call"]
 
     # An infeasible result has no times, so "no schedule data was retrieved"
     # and an UNVERIFIED TIMES flag are noise — they describe a missing
     # verification of something that was never claimed. Warnings about absent
     # data only make sense when data was supposed to be there.
-    if not itinerary.feasible:
-        itinerary.caveats = [
-            c for c in itinerary.caveats
-            if "no schedule data" not in c.lower()
-            and "estimates" not in c.lower()
+    if not result.itinerary.feasible:
+        result.itinerary.caveats = [
+            c for c in result.itinerary.caveats
+            if "no schedule data" not in c.lower() and "estimates" not in c.lower()
         ]
-        no_schedule_data = False
+        result.no_schedule_data = False
 
-    violations = [] if not itinerary.feasible else constraints.verify(
-        itinerary, prefs)
-    if violations:
-        itinerary, violations = repair(itinerary, violations, prefs,
-                                       collected_sources=sources)
+    result.violations = ([] if not result.itinerary.feasible
+                         else constraints.verify(result.itinerary, prefs))
+    if result.violations:
+        result.itinerary, result.violations = repair(
+            result.itinerary, result.violations, prefs,
+            collected_sources=result.sources, verbose=verbose,
+        )
 
-    # Surviving violations go INTO the itinerary, not just onto stderr.
-    # A run left an invented 08:10:26 departure in the printed output with the
-    # warning on a stream the reader may not even see. Detecting a problem and
+    # Surviving violations go INTO the itinerary, not just onto stderr. A run
+    # left an invented 08:10:26 departure in the printed output with the
+    # warning on a stream the reader may never see. Detecting a problem and
     # then presenting the output as fact anyway is the same failure as not
     # detecting it — worse, because we knew.
-    if violations:
-        itinerary.caveats = [
-            f"UNVERIFIED: {v.detail}" for v in violations
-        ] + list(itinerary.caveats)
-
-    print(itinerary.render())
-
-    if violations:
-        print(f"\n  [!] {constraints.report(violations)}", file=sys.stderr)
-    else:
-        print("\n  [ok] all constraints satisfied", file=sys.stderr)
+    if result.violations:
+        result.itinerary.caveats = [
+            f"UNVERIFIED: {v.detail}" for v in result.violations
+        ] + list(result.itinerary.caveats)
 
     # Grounding: do the answer's specifics trace to what the tools returned?
     # RAG improves the material a model works from; it does not stop it
-    # embellishing. This catches invented specifics — the failure mode that
-    # actually matters, since a wrong street name or price is actionable.
-    ground = grounding.check(itinerary.render(), sources)
-    if ground["unsupported"]:
-        print(f"\n  [grounding] {grounding.summary(ground)}", file=sys.stderr)
+    # embellishing.
+    result.grounding = grounding.check(result.itinerary.render(), result.sources)
 
-    trace_path = agent.write_trace(
-        question,
-        answer=itinerary.render(),
-        extra={
-            "research_notes": research,
-            "itinerary": itinerary.model_dump(),
-            "connection_gaps_min": itinerary.connection_gaps(),
-            "phase": "plan",
-            "grounding": ground,
-            "constraints": {
-                "preferences": prefs.describe(),
-                "from_memory": remembered,
-                "violations": [str(v) for v in violations],
+    if record:
+        result.trace_path = agent.write_trace(
+            question,
+            answer=result.itinerary.render(),
+            extra={
+                "research_notes": research,
+                "itinerary": result.itinerary.model_dump(),
+                "connection_gaps_min": result.itinerary.connection_gaps(),
+                "phase": "plan",
+                "grounding": result.grounding,
+                "constraints": {
+                    "preferences": prefs.describe(),
+                    "from_memory": remembered,
+                    "violations": [str(v) for v in result.violations],
+                },
             },
-        },
-    )
-    flags = []
-    if not itinerary.feasible:
-        flags.append("NO ROUTE")
-    elif no_schedule_data:
-        flags.append("UNVERIFIED TIMES")
-    if truncated:
-        flags.append("TRUNCATED")
-    if agent.LAST_RUN["repeats"]:
-        flags.append(f"{agent.LAST_RUN['repeats']} blocked repeats")
-    suffix = f" | {', '.join(flags)}" if flags else ""
+        )
+    return result
 
-    print(
-        f"\n[{llm.usage_line()} | steps: {agent.LAST_RUN['steps']}{suffix}]",
-        file=sys.stderr,
+
+def _plan() -> None:
+    """The command line. Printing only — the pipeline is plan()."""
+    question = " ".join(sys.argv[1:]) or (
+        "How do I get from Kensington Market to the Distillery District "
+        "on a weekday morning?"
     )
-    print(f"[trace: {trace_path}]", file=sys.stderr)
+    prefs = constraints.Preferences.from_env()
+    merged, remembered = memory.apply_to(prefs)
+
+    print(f"Researching: {question}", file=sys.stderr)
+    print(f"Constraints: {merged.describe()}", file=sys.stderr)
+    if remembered:
+        print(f"  (from memory: {', '.join(remembered)})", file=sys.stderr)
+    print(file=sys.stderr)
+
+    result = plan(question, prefs=prefs)
+
+    if result.no_schedule_data:
+        print("\n  [!] NO successful schedule query — every time in this "
+              "itinerary is an estimate", file=sys.stderr)
+    elif result.truncated:
+        print("\n  [!] research was truncated — the itinerary will be marked "
+              "as partly unverified", file=sys.stderr)
+
+    if result.error:
+        print(f"\n{result.error}", file=sys.stderr)
+        print("\nFalling back to the research notes:\n")
+        print(result.research)
+        sys.exit(1)
+
+    print(result.itinerary.render())
+
+    if result.violations:
+        print(f"\n  [!] {constraints.report(result.violations)}", file=sys.stderr)
+    else:
+        print("\n  [ok] all constraints satisfied", file=sys.stderr)
+
+    if result.grounding.get("unsupported"):
+        print(f"\n  [grounding] {grounding.summary(result.grounding)}",
+              file=sys.stderr)
+
+    suffix = f" | {', '.join(result.flags)}" if result.flags else ""
+    print(f"\n[{llm.usage_line()} | steps: {result.steps}{suffix}]",
+          file=sys.stderr)
+    print(f"[trace: {result.trace_path}]", file=sys.stderr)
 
 
 def main() -> None:

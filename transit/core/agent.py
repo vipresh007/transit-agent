@@ -466,6 +466,11 @@ def run(user_message: str, verbose: bool = True, require_times: bool = False,
             if verbose:
                 print(f"  [{step}] {name}({args})", file=sys.stderr)
 
+            # Notify, not event: a live view wants to show "running" while a
+            # 2.5s journey search happens, but recording a start/finish pair
+            # would halve every per-step gap the timing report derives.
+            trace.notify("tool_start", step=step, tool=name, args=args)
+
             started = time.time()
             fn = TOOL_FUNCTIONS.get(name)
             if fn is None:

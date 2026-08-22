@@ -67,15 +67,29 @@ def report(path: Path, trace: dict) -> None:
         ("tools", t.get("tool_seconds", 0), "index the database"),
         ("our own python", t.get("unaccounted_seconds", 0), "should be ~0"),
     ]
+
+    # Subagents run concurrently, so the buckets legitimately add up to more
+    # than the wall clock. Scaling bars against `wall` would overflow them and
+    # print shares like 214%. Scale against the larger of the two, and say why.
+    spent = sum(max(0, s) for _, s, _ in rows)
+    concurrent = t.get("concurrent") or spent > wall * 1.2
+    scale = max(wall, spent) if concurrent else wall
+
     for label, seconds, fix in rows:
         if seconds < 0.05:
             continue
-        share = seconds / wall if wall else 0
-        print(f"  {label:<22} {seconds:6.1f}s {share:5.0%}  {bar(seconds, wall)}")
+        share = seconds / scale if scale else 0
+        print(f"  {label:<22} {seconds:6.1f}s {share:5.0%}  {bar(seconds, scale)}")
         # A share alone is not a reason to act. 95% of 3.8 seconds is nothing
         # worth optimising, and advising it teaches you to distrust the tool.
         if share > 0.25 and seconds > 3 and not replay:
             print(f"  {'':<22} {'':>6}        -> {fix}")
+
+    if concurrent and wall:
+        print(f"\n  {spent:.0f}s of work in {wall:.0f}s of wall clock "
+              f"— {spent / wall:.1f}x parallelism.")
+        print("  Shares are of total work, not of elapsed time. Subagents ran")
+        print("  at the same time, so the buckets sum past the clock.")
 
     print(f"\n  {t.get('calls', 0)} model calls   "
           f"median {t.get('median_call', 0):.1f}s   "
