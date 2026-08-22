@@ -207,6 +207,69 @@ def test_route_label_resolution():
           [])
 
 
+def test_stop_labels_carrying_their_id():
+    section("stop labels as the tools hand them back")
+
+    for label, expected in [
+        ("Spadina Ave at Nassau St South Side (8128)",
+         ("Spadina Ave at Nassau St South Side", "8128")),
+        ("King St West at Spadina Ave East Side (15648)",
+         ("King St West at Spadina Ave East Side", "15648")),
+        ("Distillery Loop", ("Distillery Loop", None)),
+        # Not every parenthesis is an id.
+        ("Union Station (Bay St)", ("Union Station (Bay St)", None)),
+        ("", ("", None)),
+    ]:
+        check(f"{label!r} splits correctly", C.split_stop_label(label), expected)
+
+    if not HAS_DB:
+        print("  (rest skipped: transit.db not built)")
+        return
+
+    conn = C._conn()
+    try:
+        # Both of these are REAL departures that got flagged on a live run.
+        # find_nearby_stops returns "NAME (STOP_ID)", the model copied the
+        # label verbatim, and `LIKE '%NAME (8128)%'` matched no stop_name —
+        # so two correct legs cost a full repair round. Exactly the failure
+        # resolve_route was written for, one level down.
+        for route, label, t in (
+            ("510", "Spadina Ave at Nassau St South Side (8128)", "08:21:31"),
+            ("504", "King St West at Spadina Ave East Side (15648)", "08:39:22"),
+        ):
+            check(f"{route} at {t} with an id-suffixed label verifies",
+                  C._departure_is_scheduled(conn, route, label, t))
+            check(f"{route} at {t} verifies without the suffix too",
+                  C._departure_is_scheduled(
+                      conn, route, C.split_stop_label(label)[0], t))
+
+        # Tolerating the suffix must not blunt the check.
+        check("29 seconds off is still caught",
+              C._departure_is_scheduled(
+                  conn, "510", "Spadina Ave at Nassau St South Side (8128)",
+                  "08:22:00"), False)
+        check("the wrong route at a real time is still caught",
+              C._departure_is_scheduled(
+                  conn, "504", "Spadina Ave at Nassau St South Side (8128)",
+                  "08:21:31"), False)
+        check("a route that doesn't serve the stop is still caught",
+              C._departure_is_scheduled(
+                  conn, "510", "Distillery Loop (15462)", "08:21:31"), False)
+        # A stale id shouldn't condemn an otherwise-correct leg.
+        check("a bogus id falls back to the name",
+              C._departure_is_scheduled(
+                  conn, "510", "Spadina Ave at Nassau St South Side (99999)",
+                  "08:21:31"))
+
+        # Silent version of the same bug: an unparsed label returns no
+        # coordinates, so the walk-speed check skips instead of firing.
+        check("coordinates resolve through the suffix",
+              C._stop_coords(conn, "Spadina Ave at Nassau St South Side (8128)")
+              is not None)
+    finally:
+        conn.close()
+
+
 def test_infeasibility_preflight():
     section("constraints that cannot be satisfied at all")
     if not HAS_DB:
@@ -249,7 +312,8 @@ def test_reporting():
 
 if __name__ == "__main__":
     for fn in (test_transfers, test_preferences, test_against_schedule,
-               test_route_label_resolution, test_infeasibility_preflight,
+               test_route_label_resolution, test_stop_labels_carrying_their_id,
+               test_infeasibility_preflight,
                test_reporting):
         fn()
     from _harness import PASSED

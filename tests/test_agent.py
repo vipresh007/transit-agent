@@ -22,6 +22,13 @@ DAILY = "429 quotaId: 'GenerateRequestsPerDayPerProjectPerModel-FreeTier'"
 MINUTE_WITH_DELAY = "429 Please retry in 3.5s."
 BARE_429 = "429 {'message': 'Rate limit exceeded', 'code': '1300'}"
 TOOL_JSON_BAD = "400 {'code': 'tool_use_failed', 'failed_generation': '...'}"
+# Real text from a live run: mid-plan, the model wrote a paragraph reasoning
+# about which stop IDs to look up and never emitted the tool call. Groq's
+# parser rejected it server-side, so the message never reached us.
+OUTPUT_PARSE_BAD = (
+    "400 {'code': 'output_parse_failed', 'message': 'Parsing failed. The model "
+    "generated output that could not be parsed.', 'failed_generation': "
+    "'We need to produce concrete journey with real clock times...'}")
 
 OK = MagicMock(choices=[MagicMock(message=MagicMock(content="done", tool_calls=None))])
 OK.usage = None
@@ -94,6 +101,14 @@ def test_retry_and_quota():
     with td, patch("time.sleep"):
         llm.call_model([{"role": "user", "content": "x"}], verbose=False)
     check("tool_use_failed resamples", fake.chat.completions.create.call_count, 2)
+
+    # Same class of accident, different code. Killed a real plan.py run.
+    providers._active = 0
+    fake, td = fresh([om.BadRequestError(OUTPUT_PARSE_BAD), OK])
+    with td, patch("time.sleep"):
+        llm.call_model([{"role": "user", "content": "x"}], verbose=False)
+    check("output_parse_failed resamples too",
+          fake.chat.completions.create.call_count, 2)
 
     fake, td = fresh([om.BadRequestError("400 invalid schema")])
     with td, patch("time.sleep") as slept:

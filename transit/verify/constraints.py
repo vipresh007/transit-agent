@@ -156,15 +156,63 @@ def resolve_route(conn, label: str) -> str | None:
     return row[0] if row else None
 
 
+# find_nearby_stops returns "NAME (STOP_ID)", and the model copies that label
+# straight into the itinerary — reasonably, since it disambiguates the platform.
+STOP_ID_SUFFIX = re.compile(r"\s*\((\d+)\)\s*$")
+
+
+def split_stop_label(label: str) -> tuple[str, str | None]:
+    """'Spadina Ave at Nassau St South Side (8128)' -> (name, '8128').
+
+    A checker that demands the exact internal spelling will keep firing on
+    correct answers, and every false positive costs a full repair round. This
+    is the same failure `resolve_route` was written for, one level down: two
+    real departures were flagged because `LIKE '%... (8128)%'` matches no
+    stop_name, since the id isn't part of the name.
+
+    The id is a gift when present — matching on stop_id pins the exact
+    platform, which is stronger than a LIKE on a name shared by both
+    directions of a street.
+    """
+    match = STOP_ID_SUFFIX.search(label or "")
+    if match:
+        return label[:match.start()].strip(), match.group(1)
+    return (label or "").strip(), None
+
+
 def _departure_is_scheduled(conn, route: str, stop_name: str, depart: str,
                             service_id: str = "1") -> bool:
-    """Does a trip on this route really leave a stop of this name at this time?
+    """Does a trip on this route really leave this stop at this time?
 
     The strongest single check available. Grounding catches times invented from
     nothing; this catches a time that IS real but belongs to a different stop
     or route — a copy-paste error the model makes when juggling several legs,
     and one that looks completely plausible in the output.
     """
+    name, stop_id = split_stop_label(stop_name)
+
+    if stop_id:
+        # Exact platform. Also much faster than a leading-wildcard LIKE.
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM trips t
+            JOIN routes r      ON r.route_id = t.route_id
+            JOIN stop_times st ON st.trip_id = t.trip_id
+            WHERE r.route_short_name = ?
+              AND t.service_id = ?
+              AND st.stop_id = ?
+              AND substr('0' || st.departure_time, -8) = ?
+            LIMIT 1
+            """,
+            (route, service_id, stop_id, depart),
+        ).fetchone()
+        if row is not None:
+            return True
+        # An id that resolves to nothing is more likely a stale label than a
+        # fabricated departure, so fall through to the name check rather than
+        # reporting a violation on the strength of the parenthesis alone.
+
     return conn.execute(
         """
         SELECT 1
@@ -178,16 +226,30 @@ def _departure_is_scheduled(conn, route: str, stop_name: str, depart: str,
           AND substr('0' || st.departure_time, -8) = ?
         LIMIT 1
         """,
-        (route, service_id, f"%{stop_name.strip()}%", depart),
+        (route, service_id, f"%{name}%", depart),
     ).fetchone() is not None
 
 
 def _stop_coords(conn, stop_name: str):
-    row = conn.execute(
+    """Coordinates for a stop label, which may carry a '(stop_id)' suffix.
+
+    Same trap as the departure check, quieter consequences: an unresolved
+    label returns None, the walk-speed check silently skips, and an impossible
+    2-minute sprint across a kilometre goes unflagged. A checker that can't
+    parse its input doesn't report a problem — it reports nothing.
+    """
+    name, stop_id = split_stop_label(stop_name)
+    if stop_id:
+        row = conn.execute(
+            "SELECT CAST(stop_lat AS REAL), CAST(stop_lon AS REAL) FROM stops "
+            "WHERE stop_id = ? LIMIT 1", (stop_id,)
+        ).fetchone()
+        if row:
+            return row
+    return conn.execute(
         "SELECT CAST(stop_lat AS REAL), CAST(stop_lon AS REAL) FROM stops "
-        "WHERE stop_name LIKE ? LIMIT 1", (f"%{stop_name.strip()}%",)
+        "WHERE stop_name LIKE ? LIMIT 1", (f"%{name}%",)
     ).fetchone()
-    return row
 
 
 def _metres(a, b) -> float:

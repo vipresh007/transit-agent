@@ -190,6 +190,75 @@ def test_entry_points_are_thin():
         check(f"{name} imports main()", "main" in imported)
 
 
+def test_nothing_imports_a_root_launcher():
+    section("no module is shadowed by its own launcher")
+
+    # `import graph` resolves to the root LAUNCHER, not transit/pipeline/graph.
+    # It imports cleanly and exports only main(), so every attribute lookup
+    # fails at runtime — test_graph.py died on `G.build`. The rewrite that
+    # moved these imports only matched at column zero, and this one sat inside
+    # a `try:` block.
+    #
+    # Any bare `import agent|plan|crew|graph` is now ambiguous by construction.
+    # The launchers are the price of keeping the commands short; this is the
+    # guard that makes the price safe.
+    shadowed = {f[:-3] for f in ENTRY_POINTS}
+
+    offenders = []
+    for path in sources():
+        if path.name in ENTRY_POINTS:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                names = [node.module]
+            for n in names:
+                if n.split(".")[0] in shadowed:
+                    offenders.append(
+                        f"{rel(path)}:{node.lineno} `{n}` is a root launcher — "
+                        f"use transit.<subpackage>.{n.split('.')[0]}")
+
+    for o in offenders:
+        print(f"    {o}")
+    check("nothing imports a bare launcher name", offenders, [])
+
+
+def test_no_logic_hides_in_a_main_guard():
+    section("nothing important lives under `if __name__`")
+
+    # plan.py kept its crash-trace handler in the `__main__` guard. Adding the
+    # root launchers moved the entry point to
+    # `from transit.pipeline.plan import main`, so the guard stopped running
+    # and the crash trace vanished — silently, since nothing crashed in a test.
+    # A `__main__` block is dead code the moment anything imports the module,
+    # so the only safe thing to put there is a call.
+    offenders = []
+    for path in sources():
+        if path.parent.name == "tests" or path.name in ENTRY_POINTS:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not (isinstance(node, ast.If)
+                    and isinstance(node.test, ast.Compare)
+                    and isinstance(node.test.left, ast.Name)
+                    and node.test.left.id == "__name__"):
+                continue
+            for stmt in node.body:
+                # A bare call, `sys.exit(main())`, or an import: all fine.
+                if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+                    continue
+                if isinstance(stmt, (ast.Import, ast.ImportFrom, ast.Pass)):
+                    continue
+                offenders.append(
+                    f"{rel(path)}:{stmt.lineno} {type(stmt).__name__} in "
+                    f"`if __name__` — move it into a function")
+
+    for o in offenders:
+        print(f"    {o}")
+    check("__main__ guards only call something", offenders, [])
+
+
 def test_every_package_is_importable():
     section("no package is missing its __init__.py")
 
@@ -203,7 +272,9 @@ def test_every_package_is_importable():
 
 if __name__ == "__main__":
     for fn in (test_project_imports_resolve, test_no_dangling_module_references,
-               test_entry_points_are_thin, test_every_package_is_importable):
+               test_entry_points_are_thin, test_nothing_imports_a_root_launcher,
+               test_no_logic_hides_in_a_main_guard,
+               test_every_package_is_importable):
         fn()
     from _harness import PASSED
     print(f"\n{PASSED['n']} checks passed")

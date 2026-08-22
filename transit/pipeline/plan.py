@@ -246,7 +246,7 @@ def repair(itinerary, violations, prefs, rounds: int = 2, verbose: bool = True,
     return itinerary, violations
 
 
-def main() -> None:
+def _plan() -> None:
     question = " ".join(sys.argv[1:]) or (
         "How do I get from Kensington Market to the Distillery District "
         "on a weekday morning?"
@@ -386,13 +386,22 @@ def main() -> None:
     print(f"[trace: {trace_path}]", file=sys.stderr)
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Entry point, wrapping the run so a crash still leaves a record.
+
+    This used to live under `if __name__ == "__main__":`. Adding the root
+    launcher moved the entry point to `from transit.pipeline.plan import main`,
+    so the guard stopped running and the crash trace silently disappeared —
+    discovered when a 400 killed a run five requests in and left nothing
+    behind. Logic in a `__main__` guard is unreachable the moment anything
+    imports the module; tests/test_imports.py now checks for it.
+    """
     try:
-        main()
+        _plan()
     except Exception:
         import traceback
         # A crash is precisely when the trace is most useful, and precisely
-        # when the happy-path write at the end of main() never runs.
+        # when the happy-path write at the end of _plan() never runs.
         try:
             path = agent.write_trace(
                 " ".join(sys.argv[1:]) or "(default question)",
@@ -403,3 +412,7 @@ if __name__ == "__main__":
         except Exception:
             pass
         raise
+
+
+if __name__ == "__main__":
+    main()

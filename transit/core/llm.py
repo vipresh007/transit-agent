@@ -7,6 +7,8 @@ failures are worth retrying, which are worth waiting out, and which mean stop:
   per-minute 429            wait the delay the server states, then retry
   daily quota 429           waiting won't help; fail over to another provider
   tool_use_failed 400       the MODEL emitted bad JSON; resample
+  output_parse_failed 400   the MODEL wrote prose where a tool call belonged;
+                            resample
   any other 400             OUR request is malformed; retrying fails slower
   404 model not found       config error; say so and stop
 
@@ -204,14 +206,30 @@ def call_model(messages, attempts: int = 5, verbose: bool = True, use_tools: boo
             delay = min(delay * 2, 60.0)
 
         except BadRequestError as exc:
-            # Most 400s mean OUR request is malformed. But `tool_use_failed`
-            # means the MODEL emitted tool arguments that aren't valid JSON --
-            # a sampling accident. The provider rejects it before we see the
-            # message, so feeding the error back isn't possible; resample.
-            if "tool_use_failed" not in str(exc) or attempt == attempts - 1:
+            # Most 400s mean OUR request is malformed, and retrying just fails
+            # slower. Two of Groq's do not — they mean the MODEL produced
+            # something the provider's own parser rejected, which is a sampling
+            # accident and very likely to come out fine next time:
+            #
+            #   tool_use_failed      tool arguments that aren't valid JSON
+            #   output_parse_failed  reasoning text where a tool call belonged.
+            #                        Seen mid-plan: the model wrote a paragraph
+            #                        of "we need to find stop IDs..." and never
+            #                        emitted the call.
+            #
+            # Both are rejected server-side, so we never receive the message
+            # and cannot feed the error back the way a tool error is fed back.
+            # Resampling is the only move. Distinguishing these from a genuinely
+            # malformed request matters: treating all 400s as retriable hides
+            # our own bugs behind five slow attempts, and treating none as
+            # retriable kills a run over one bad sample.
+            resamplable = ("tool_use_failed", "output_parse_failed")
+            if not any(code in str(exc) for code in resamplable) \
+                    or attempt == attempts - 1:
                 raise
             last_exc = exc
-            _log("! model emitted malformed tool-call JSON — resampling", verbose)
+            _log("! provider could not parse the model's output — resampling",
+                 verbose)
             time.sleep(1 + random.uniform(0, 1))
 
         except RETRIABLE as exc:

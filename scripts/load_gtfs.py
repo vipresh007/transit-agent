@@ -140,7 +140,7 @@ def load_table(conn: sqlite3.Connection, zf: zipfile.ZipFile, filename: str) -> 
     return count
 
 
-def main() -> None:
+def _load() -> None:
     download(resolve_download_url())
 
     if os.path.exists(DB_PATH):
@@ -188,9 +188,15 @@ def main() -> None:
     print(f"\nWrote {DB_PATH} ({size_mb} MB)")
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Entry point. The error handling belongs here, not in a `__main__`
+    guard, where it stops running the moment anything imports this module."""
     try:
-        main()
+        _load()
     except requests.HTTPError as exc:
         print(f"Download failed: {exc}", file=sys.stderr)
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

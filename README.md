@@ -80,6 +80,10 @@ malformed tool-call JSON" or "the provider hit its daily quota mid-conversation"
 on demand. Every check in `test_agent.py` matches a bug that actually happened;
 the comments say which.
 
+A suite that can't run exits **3**, and the runner reports it as SKIPPED
+rather than counting it as a pass — `test_graph.py` was silently skipping in
+an environment without langgraph while a broken import sat in it.
+
 `test_imports.py` is static and runs first. It exists because the package
 reorganisation left `journey.py` calling `paths.readonly_uri()` without
 importing `paths`. All eight other suites passed — the bug sat inside a

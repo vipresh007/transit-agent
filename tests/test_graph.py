@@ -25,16 +25,18 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 try:
-    import graph as G                                      # noqa: E402
+    # NOT `import graph` — that resolves to the root LAUNCHER, which exports
+    # only main(). It imported cleanly and then every attribute lookup failed.
+    from transit.pipeline import graph as G                # noqa: E402
     from langgraph.types import Command, Send              # noqa: E402
     HAVE_LANGGRAPH = True
 except ImportError as exc:
-    print(f"  (skipped: {exc})")
+    print(f"  SKIPPED: {exc}")
     print("  install with: pip install langgraph langgraph-checkpoint-sqlite")
     HAVE_LANGGRAPH = False
 
 if HAVE_LANGGRAPH:
-    import crew                                            # noqa: E402
+    from transit.pipeline import crew                      # noqa: E402
 
 
 CALLS = {"decompose": 0, "research": [], "synthesize": 0}
@@ -320,7 +322,12 @@ def test_approval_yes_proceeds():
 
 if __name__ == "__main__":
     if not HAVE_LANGGRAPH:
-        sys.exit(0)
+        # Exit 3, not 0. A skipped suite that reports success is exactly the
+        # "make absence representable" failure this project keeps relearning:
+        # I could not tell, from the runner's output, that this suite had
+        # never executed — so a broken import survived in the one environment
+        # where langgraph WAS installed.
+        sys.exit(3)
     for fn in (test_shape, test_fan_out_width, test_reducer_keeps_every_branch,
                test_one_failure_does_not_lose_the_rest,
                test_resume_does_not_repay_for_finished_work,

@@ -39,19 +39,31 @@ SUITES = [
 ]
 
 
+# A suite exits 3 to say "I did not run" — a missing optional dependency, not
+# a pass. Reporting a skip as success is how a broken import in test_graph.py
+# survived: the runner printed the same thing either way.
+SKIPPED = 3
+
+
 def main() -> None:
-    failed = []
+    failed, skipped = [], []
     for name, cmd, cwd in SUITES:
         print(f"\n{'=' * 62}\n{name}\n{'=' * 62}")
-        result = subprocess.run(cmd, cwd=cwd)
-        if result.returncode != 0:
+        code = subprocess.run(cmd, cwd=cwd).returncode
+        if code == SKIPPED:
+            skipped.append(name)
+        elif code != 0:
             failed.append(name)
 
     print(f"\n{'=' * 62}")
     if failed:
         print(f"FAILED: {', '.join(failed)}")
         sys.exit(1)
-    print(f"All {len(SUITES)} suites passed.")
+    ran = len(SUITES) - len(skipped)
+    line = f"All {ran} suites passed."
+    if skipped:
+        line += f"  SKIPPED (did not run): {', '.join(skipped)}"
+    print(line)
 
 
 if __name__ == "__main__":
