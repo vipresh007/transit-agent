@@ -43,7 +43,10 @@ Layers, not alternatives — each calls the one below. Pick one per question.
 and schedule verification `plan.py` adds — their answers are grounded but not
 checked against the timetable.
 
-Everything in `scripts/` runs once at setup. `tests/run_all.py` runs after code
+`python scripts/timing.py` breaks the last run down by where the wall clock
+went; `--compare before.json after.json` makes an optimisation falsifiable.
+
+Everything else in `scripts/` runs once at setup. `tests/run_all.py` runs after code
 changes. `python -m transit.pipeline.evals` spends quota; run it on purpose.
 
 ## Layout
@@ -56,7 +59,7 @@ transit/
   tools/        geo, transit, journey, guides, memory, registry
   verify/       constraints, grounding, schemas
   pipeline/     plan, crew, graph, evals
-scripts/        load_gtfs, load_guides, optimize_db, list_models
+scripts/        load_gtfs, load_guides, optimize_db, list_models, timing
 data/           databases and downloads (gitignored)
 tests/
 ```

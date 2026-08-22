@@ -42,6 +42,49 @@ RETRIABLE = (InternalServerError, RateLimitError, APIConnectionError, APITimeout
 # conversation. Track both; the token number is the one that surprises you.
 USAGE = {"n": 0, "prompt_tokens": 0, "completion_tokens": 0}
 
+# "The run was slow" is three different problems with three different fixes,
+# and one number cannot tell them apart:
+#
+#   model_seconds   time the provider spent generating. Fix with a smaller
+#                   prompt, fewer tools in scope, THINKING_BUDGET=0.
+#   wait_seconds    time WE spent asleep on rate limits and backoff. Fix by
+#                   pinning a provider, pacing, or waiting for quota to reset.
+#   throttle_seconds  our own deliberate pacing between requests.
+#
+# A 60-second run that was 55s generating and a 60-second run that was 55s
+# sleeping look identical from outside and share no remedy. Measuring the
+# aggregate would have sent us optimising the prompt when the real answer was
+# "you burned Groq's daily quota an hour ago".
+TIMING = {"model_seconds": 0.0, "wait_seconds": 0.0, "throttle_seconds": 0.0,
+          "latencies": []}
+
+
+def reset_timing() -> None:
+    TIMING.update(model_seconds=0.0, wait_seconds=0.0, throttle_seconds=0.0,
+                  latencies=[])
+
+
+def _slept(seconds: float, bucket: str = "wait_seconds") -> None:
+    """Sleep, and remember that we did. Every sleep site routes through here
+    so no waiting can go unaccounted for."""
+    TIMING[bucket] += seconds
+    time.sleep(seconds)
+
+
+def timing_summary() -> dict:
+    """Numbers for the trace. Percentiles need more than a handful of calls,
+    so report the shape that's actually meaningful: total, worst, typical."""
+    lat = sorted(TIMING["latencies"])
+    return {
+        "model_seconds": round(TIMING["model_seconds"], 1),
+        "wait_seconds": round(TIMING["wait_seconds"], 1),
+        "throttle_seconds": round(TIMING["throttle_seconds"], 1),
+        "calls": len(lat),
+        "slowest_call": lat[-1] if lat else 0.0,
+        "median_call": lat[len(lat) // 2] if lat else 0.0,
+        "latencies": lat,
+    }
+
 
 class DailyQuotaExhausted(RuntimeError):
     """Out of requests for the day. Waiting will not help."""
@@ -84,6 +127,19 @@ def usage_line() -> str:
     ]
     if cache.summary():
         parts.append(cache.summary())
+
+    # Two numbers, because they mean different things and have different
+    # fixes. Waiting is only shown when there was some — a clean run
+    # shouldn't carry a "0.0s waiting" that trains you to ignore the field.
+    timing = [f"{TIMING['model_seconds']:.0f}s model"]
+    if TIMING["wait_seconds"] >= 1:
+        timing.append(f"{TIMING['wait_seconds']:.0f}s waiting")
+    if TIMING["throttle_seconds"] >= 1:
+        timing.append(f"{TIMING['throttle_seconds']:.0f}s paced")
+    if TIMING["latencies"]:
+        timing.append(f"slowest {max(TIMING['latencies']):.0f}s")
+    parts.append(", ".join(timing))
+
     return " | ".join(parts)
 
 
@@ -100,7 +156,7 @@ def _backoff(exc, attempt: int, attempts: int, delay: float, verbose: bool) -> N
     wait = server_retry_delay(exc) or (delay + random.uniform(0, 1))
     _log(f"! {type(exc).__name__} — retrying in {wait:.1f}s "
          f"(attempt {attempt + 2}/{attempts})", verbose)
-    time.sleep(wait)
+    _slept(wait)
 
 
 def call_model(messages, attempts: int = 5, verbose: bool = True, use_tools: bool = True):
@@ -133,8 +189,12 @@ def call_model(messages, attempts: int = 5, verbose: bool = True, use_tools: boo
                 counted_miss = True
 
         try:
+            paced = time.perf_counter()
             providers.throttle()
+            TIMING["throttle_seconds"] += time.perf_counter() - paced
+
             USAGE["n"] += 1
+            started = time.perf_counter()
             response = providers.client().chat.completions.create(
                 model=providers.model(),
                 messages=sent,
@@ -144,6 +204,13 @@ def call_model(messages, attempts: int = 5, verbose: bool = True, use_tools: boo
                 tools=TOOL_SCHEMAS if use_tools else None,
                 extra_body=providers.extra_body(),
             )
+            # Only a request that RETURNED counts as model time. A call that
+            # 429s spent real seconds too, but attributing those to generation
+            # would make a rate-limited run look like a slow model.
+            elapsed = time.perf_counter() - started
+            TIMING["model_seconds"] += elapsed
+            TIMING["latencies"].append(round(elapsed, 2))
+
             usage = getattr(response, "usage", None)
             if usage:
                 USAGE["prompt_tokens"] += usage.prompt_tokens or 0
@@ -169,7 +236,7 @@ def call_model(messages, attempts: int = 5, verbose: bool = True, use_tools: boo
                     continue
                 _log(f"~ rate limited; server says retry in {stated:.0f}s "
                      f"— waiting (attempt {attempt + 1}/{attempts})", verbose)
-                time.sleep(stated + 1)
+                _slept(stated + 1)
                 continue
 
             if _is_daily_quota(exc):
@@ -230,7 +297,7 @@ def call_model(messages, attempts: int = 5, verbose: bool = True, use_tools: boo
             last_exc = exc
             _log("! provider could not parse the model's output — resampling",
                  verbose)
-            time.sleep(1 + random.uniform(0, 1))
+            _slept(1 + random.uniform(0, 1))
 
         except RETRIABLE as exc:
             last_exc = exc

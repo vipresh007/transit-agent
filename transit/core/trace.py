@@ -29,6 +29,48 @@ def event(kind: str, **fields) -> None:
     EVENTS.append({"kind": kind, "t": round(time.time(), 3), **fields})
 
 
+def _timing() -> dict:
+    """Where the wall clock went, split by cause.
+
+    The per-step gaps are the point. Aggregates say "the model was slow";
+    the sequence says WHY — latency that climbs 4s → 9s → 12s → 23s is the
+    conversation growing, because every turn resends everything before it.
+    A flat sequence at the same total means something else entirely.
+
+    Imported lazily: trace.py sits below llm.py in the layering, and a
+    top-level import would make the cycle real.
+    """
+    from transit.core import llm
+
+    events = EVENTS.snapshot()
+    summary = llm.timing_summary()
+
+    if events:
+        wall = float(events[-1]["t"]) - float(events[0]["t"])
+        tool_seconds = sum(float(e.get("seconds", 0)) for e in events
+                           if e["kind"] == "tool_call")
+        previous = float(events[0]["t"])
+        gaps = []
+        for event in events:
+            gaps.append({
+                "step": event.get("step"),
+                "before": event.get("tool") or "final answer",
+                "gap_seconds": round(float(event["t"]) - previous, 1),
+            })
+            previous = float(event["t"])
+        summary.update(
+            wall_seconds=round(wall, 1),
+            tool_seconds=round(tool_seconds, 2),
+            # Anything not generating, sleeping, pacing or in a tool: our own
+            # Python. Expected to be near zero; if it isn't, that's news.
+            unaccounted_seconds=round(
+                wall - summary["model_seconds"] - summary["wait_seconds"]
+                - summary["throttle_seconds"] - tool_seconds, 1),
+            step_gaps=gaps,
+        )
+    return summary
+
+
 def write(
     question: str,
     answer: str = "",
@@ -53,6 +95,7 @@ def write(
             k: (sorted(v) if isinstance(v, set) else v) for k, v in flags.items()
         },
         "events": EVENTS.snapshot(),
+        "timing": _timing(),
         "answer": answer,
         **(extra or {}),
     }
