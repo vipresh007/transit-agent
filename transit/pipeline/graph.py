@@ -59,9 +59,6 @@ import sys
 import time
 from typing import Annotated, TypedDict
 
-from dotenv import load_dotenv
-
-load_dotenv()
 
 try:
     from langgraph.checkpoint.sqlite import SqliteSaver
@@ -344,7 +341,7 @@ def report(question: str, state: dict, tid: str, elapsed: float) -> None:
         question, answer,
         provider=providers.current()["name"], model=providers.model(),
         usage=llm.USAGE, cache_stats={}, flags={"subtasks": len(results)},
-        events=merged, wall_seconds=elapsed,
+        events=merged, wall_seconds=elapsed, concurrent=True,
         extra={
             "phase": "graph",
             "thread_id": tid,

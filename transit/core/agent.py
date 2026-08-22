@@ -31,10 +31,8 @@ import sys
 import time
 from datetime import date
 
-from dotenv import load_dotenv
 from openai import NotFoundError
 
-load_dotenv()
 
 from transit.core import cache
 from transit.verify import grounding
@@ -568,8 +566,14 @@ def run(user_message: str, verbose: bool = True, require_times: bool = False,
     )
 
 
-def write_trace(question: str, answer: str = "", extra: dict | None = None):
-    """Thin wrapper so callers don't have to assemble the metadata."""
+def write_trace(question: str, answer: str = "", extra: dict | None = None,
+                **kwargs):
+    """Thin wrapper so callers don't have to assemble the metadata.
+
+    **kwargs forwards trace.write's events/wall_seconds/concurrent, which
+    callers that fan out or that span several agent.run() calls must supply
+    themselves — see the note in trace._timing.
+    """
     return trace.write(
         question,
         answer,
@@ -579,6 +583,7 @@ def write_trace(question: str, answer: str = "", extra: dict | None = None):
         cache_stats=cache.STATS,
         flags=LAST_RUN,
         extra=extra,
+        **kwargs,
     )
 
 

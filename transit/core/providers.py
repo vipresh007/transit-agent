@@ -60,27 +60,54 @@ PROVIDERS = [
     },
 ]
 
+class NoProviderConfigured(RuntimeError):
+    """No usable API key. Raised on first use, never at import."""
+
+
 AVAILABLE = [p for p in PROVIDERS if os.getenv(p["key_env"])]
-if not AVAILABLE:
-    sys.exit("No provider configured. Set GEMINI_API_KEY or GROQ_API_KEY in .env")
 
 # PROVIDER=groq forces a specific one and disables failover.
 _forced = os.getenv("PROVIDER")
 if _forced:
-    AVAILABLE = [p for p in AVAILABLE if p["name"] == _forced] or sys.exit(
-        f"PROVIDER={_forced} has no key configured"
-    )
+    AVAILABLE = [p for p in AVAILABLE if p["name"] == _forced]
 
+# What went wrong, remembered rather than acted on. See _require() below.
+_config_error = None
+if _forced and not AVAILABLE:
+    _config_error = f"PROVIDER={_forced} has no key configured in .env"
+elif not AVAILABLE:
+    _config_error = ("No provider configured. Set GEMINI_API_KEY or "
+                     "GROQ_API_KEY in .env")
 
 _active = 0
-_client = OpenAI(
-    api_key=os.getenv(AVAILABLE[0]["key_env"]),
-    base_url=AVAILABLE[0]["base_url"],
-)
+_client = None
+
+
+def _require() -> None:
+    """Fail on use, not on import.
+
+    This module used to call `sys.exit()` here, at import time, when no key was
+    set. That is a decision only a command-line program is entitled to make,
+    and this is an importable library — so it killed anything that wasn't a
+    CLI.
+
+    What that cost: the Streamlit UI forgot to call load_dotenv(), so no key
+    was in the environment, so importing providers called sys.exit(). SystemExit
+    inherits from BaseException, NOT Exception, so the UI's `except Exception`
+    guard did not catch it, and Streamlit swallowed it silently. The result was
+    a page that said "loading the agent…" forever with a completely clean
+    terminal — the least debuggable failure available.
+
+    A library raises; only an entry point decides to exit. And an exception a
+    caller cannot reasonably catch is barely better than a hang.
+    """
+    if _config_error:
+        raise NoProviderConfigured(_config_error)
 
 
 def current() -> dict:
     """The provider serving requests right now."""
+    _require()
     return AVAILABLE[_active]
 
 
@@ -89,6 +116,12 @@ def model() -> str:
 
 
 def client() -> OpenAI:
+    """Built on first use, so importing this module is always safe."""
+    global _client
+    _require()
+    if _client is None:
+        _client = OpenAI(api_key=os.getenv(current()["key_env"]),
+                         base_url=current()["base_url"])
     return _client
 
 

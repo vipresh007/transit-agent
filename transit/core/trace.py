@@ -72,7 +72,8 @@ def event(kind: str, **fields) -> None:
     notify(kind, **fields)
 
 
-def _timing(events: list | None = None, wall_seconds: float | None = None) -> dict:
+def _timing(events: list | None = None, wall_seconds: float | None = None,
+            concurrent: bool = False) -> dict:
     """Where the wall clock went, split by cause.
 
     The per-step gaps are the point. Aggregates say "the model was slow";
@@ -117,10 +118,12 @@ def _timing(events: list | None = None, wall_seconds: float | None = None) -> di
                 wall - summary["model_seconds"] - summary["wait_seconds"]
                 - summary["throttle_seconds"] - tool_seconds, 1),
             step_gaps=gaps,
-            # Concurrent work makes the buckets sum past the wall clock. That
-            # excess IS the parallelism, and the reporter needs to be told so
-            # rather than inferring a negative "unaccounted" figure.
-            concurrent=summary["model_seconds"] + summary["wait_seconds"] > wall * 1.2,
+            # Told, not inferred. Inferring it from "the buckets exceed the
+            # wall clock" declared a single-threaded plan.py run to be 1.7x
+            # parallel — the buckets covered the whole pipeline while the wall
+            # clock covered only the last agent.run(). Two different scopes
+            # compared as if they were one.
+            concurrent=concurrent,
         )
     return summary
 
@@ -137,6 +140,7 @@ def write(
     extra: dict | None = None,
     events: list | None = None,
     wall_seconds: float | None = None,
+    concurrent: bool = False,
 ) -> Path:
     TRACE_DIR.mkdir(exist_ok=True)
     payload = {
@@ -151,7 +155,7 @@ def write(
             k: (sorted(v) if isinstance(v, set) else v) for k, v in flags.items()
         },
         "events": EVENTS.snapshot() if events is None else events,
-        "timing": _timing(events, wall_seconds),
+        "timing": _timing(events, wall_seconds, concurrent),
         "answer": answer,
         **(extra or {}),
     }

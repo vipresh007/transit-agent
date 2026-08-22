@@ -259,6 +259,73 @@ def test_no_logic_hides_in_a_main_guard():
     check("__main__ guards only call something", offenders, [])
 
 
+def test_no_library_module_calls_sys_exit():
+    section("libraries raise, entry points exit")
+
+    # providers.py called sys.exit() at import when no API key was set. That
+    # is a decision only a command-line program may make, and providers.py is
+    # imported by everything. The Streamlit UI forgot load_dotenv(), so the
+    # import exited — and SystemExit is a BaseException, so the UI's
+    # `except Exception` guard sailed past it and Streamlit swallowed it.
+    # Result: a page reading "loading the agent…" forever, clean terminal.
+    #
+    # scripts/ is exempt: those ARE command-line programs.
+    offenders = []
+    for path in sources():
+        if path.parts[-2:][0] in ("scripts", "tests") or path.name in ENTRY_POINTS:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "exit"
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "sys"):
+                # A main() is an entry point even when it lives in the package.
+                enclosing = [n.name for n in ast.walk(tree)
+                             if isinstance(n, ast.FunctionDef)
+                             and node.lineno >= n.lineno
+                             and node.lineno <= (n.end_lineno or n.lineno)]
+                if "main" in enclosing or "_plan" in enclosing:
+                    continue
+                offenders.append(
+                    f"{rel(path)}:{node.lineno} sys.exit() in a library module "
+                    f"— raise instead, and let the caller decide")
+
+    for o in offenders:
+        print(f"    {o}")
+    check("no library module ends the process", offenders, [])
+
+
+def test_env_is_loaded_once_by_the_package():
+    section(".env loads before anything reads it")
+
+    # This was per-entry-point, and it lived in agent.py. plan.py imports
+    # agent, so the CLI worked; ui.py imports llm, which reaches providers
+    # WITHOUT touching agent — so no key was set and providers exited during
+    # import. Whether your config loaded depended on import order.
+    #
+    # A package __init__ is the only place guaranteed to run before any
+    # submodule. Configuration everything depends on cannot be loaded by one
+    # of the things that depends on it.
+    init = (ROOT / "transit" / "__init__.py").read_text(encoding="utf-8")
+    check("the package loads .env itself", "load_dotenv()" in init)
+
+    # And exactly once: scattered copies re-create the ordering question they
+    # were meant to answer, and hide which one is actually load-bearing.
+    stragglers = []
+    for path in sources() + [ROOT / "ui.py"]:
+        if path.name == "__init__.py" and path.parent.name == "transit":
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("load_dotenv()"):
+                stragglers.append(rel(path))
+    for straggler in set(stragglers):
+        print(f"    {straggler}")
+    check("nothing else calls it", sorted(set(stragglers)), [])
+
+
 def test_every_package_is_importable():
     section("no package is missing its __init__.py")
 
@@ -274,6 +341,8 @@ if __name__ == "__main__":
     for fn in (test_project_imports_resolve, test_no_dangling_module_references,
                test_entry_points_are_thin, test_nothing_imports_a_root_launcher,
                test_no_logic_hides_in_a_main_guard,
+               test_no_library_module_calls_sys_exit,
+               test_env_is_loaded_once_by_the_package,
                test_every_package_is_importable):
         fn()
     from _harness import PASSED

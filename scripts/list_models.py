@@ -24,9 +24,6 @@ import re
 import sys
 
 import requests
-from dotenv import load_dotenv
-
-load_dotenv()
 
 # Imported after load_dotenv so the provider list reflects your .env.
 from transit.core.providers import AVAILABLE  # noqa: E402

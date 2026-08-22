@@ -208,6 +208,14 @@ zero-minute walk and wrote *"a placeholder to satisfy schema requirements"*.
 **Normalise before comparing strings** — Unicode broke comparison three times:
 curly apostrophes, em-dashes, U+202F narrow no-break space.
 
+**A library raises; only an entry point exits** — `providers.py` called
+`sys.exit()` at import when no API key was set. `SystemExit` is a
+`BaseException`, so `except Exception` guards sail past it. The Streamlit UI
+imported `llm` (which reaches `providers`) before `agent` (which loaded
+`.env`), so no key was set, the import exited, and the page hung on "loading…"
+with a clean terminal. `.env` now loads in `transit/__init__.py` — config that
+everything depends on can't be loaded by one of the things that depends on it.
+
 **Windows** — `.ps1` does nothing in `cmd.exe` (use `activate.bat`); PowerShell's
 `del` wants commas, not spaces; the Store Python alias can shadow the venv;
 `winget`-installed `ollama` needs a fresh shell.

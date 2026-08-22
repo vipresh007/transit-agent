@@ -22,20 +22,54 @@ from __future__ import annotations
 
 import io
 import queue
-import sys
 import threading
 import time
+import traceback as tb
 from contextlib import redirect_stderr
 
 import streamlit as st
 
-from transit import paths
-from transit.core import agent, llm, trace
-from transit.tools import memory
-from transit.verify import constraints, schemas
-
 st.set_page_config(page_title="Toronto transit agent", page_icon="🚋",
                    layout="centered")
+
+# PAINT BEFORE IMPORTING. The project imports below pull in the whole agent —
+# providers, tool registry, SQLite. If any of that raises or hangs, and it
+# happens before the first st.* call, the browser gets a blank page and the
+# terminal gets nothing: the server is fine, the script just never finished.
+# A blank page is the least debuggable failure there is, so make it impossible.
+st.title("🚋 Toronto transit agent")
+_loading = st.empty()
+_loading.caption("loading the agent…")
+
+# EVERY entry point must do this. plan.py, crew.py and graph.py all call
+# load_dotenv(); this file didn't, so no API key reached the environment and
+# providers.py exited during import — silently, because SystemExit is not an
+# Exception. "Load the config" is a per-entry-point responsibility that is
+# invisible until the one entry point that forgets it.
+
+try:
+    from transit import paths
+    from transit.core import llm, trace
+    from transit.pipeline import view
+    from transit.tools import memory
+    from transit.verify import constraints
+# BaseException, not Exception. A module calling sys.exit() raises SystemExit,
+# which `except Exception` sails straight past — and Streamlit then swallows it
+# and leaves the page hanging on this caption with a clean terminal. Catching
+# the narrower type is what made this bug invisible for three rounds.
+except BaseException as exc:                                # noqa: BLE001
+    _loading.empty()
+    if isinstance(exc, SystemExit):
+        st.error(f"A module called sys.exit() while importing: {exc}")
+        st.caption("A library should raise, not exit — only an entry point "
+                   "gets to end the process.")
+    else:
+        st.error("The agent failed to import. This is a code or environment "
+                 "problem, not a Streamlit one.")
+        st.code(tb.format_exc())
+    st.stop()
+
+_loading.empty()
 
 # Tools whose progress is worth narrating. The rest are fast enough that a
 # spinner for them is noise.
@@ -119,16 +153,8 @@ def render_itinerary(itinerary) -> None:
         st.error(f"**No route found.** {itinerary.infeasible_reason}")
         return
 
-    rows = []
-    for leg in itinerary.legs:
-        rows.append({
-            "Leave": schemas.to_civil(leg.depart),
-            "Mode": "walk" if leg.mode == "walk" else f"{leg.mode} {leg.route}",
-            "From": leg.origin,
-            "To": leg.destination,
-            "Mins": leg.duration_min,
-        })
-    st.dataframe(rows, hide_index=True, use_container_width=True)
+    st.dataframe(view.leg_rows(itinerary), hide_index=True,
+                 use_container_width=True)
     st.caption(f"{itinerary.total_min} min total, "
                f"{itinerary.transfers} transfer(s)")
 
@@ -138,22 +164,9 @@ def render_itinerary(itinerary) -> None:
 
 
 def render_badges(result) -> None:
-    left, middle, right = st.columns(3)
-
-    with left:
-        st.metric("Schedule", f"{len(result.violations)} problem(s)"
-                  if result.violations else "verified")
-
-    with middle:
-        # The distinction this project keeps relearning: an answer with no
-        # retrieved times isn't wrong, it's unfounded — and the two look
-        # identical unless something says so out loud.
-        st.metric("Times", "ESTIMATED" if result.no_schedule_data
-                  else "from the feed")
-
-    with right:
-        coverage = result.grounding.get("coverage")
-        st.metric("Grounding", f"{coverage:.0%}" if coverage is not None else "—")
+    for column, (label, value) in zip(st.columns(3),
+                                      view.badge_values(result).items()):
+        column.metric(label, value)
 
     if result.flags:
         st.warning(" · ".join(result.flags))
@@ -176,19 +189,27 @@ def render_badges(result) -> None:
 # Page
 # ---------------------------------------------------------------------------
 
-st.title("🚋 Toronto transit agent")
-
 with st.sidebar:
     st.subheader("Standing preferences")
     st.caption("Saved in memory.db and enforced as constraints, not "
                "suggestions. Cleared only when you clear them.")
-    stored = memory.load()
-    if stored:
-        for key, value in stored.items():
+    try:
+        rows = view.remembered_rows()
+    except Exception:                                       # noqa: BLE001
+        # Reading memory.db must never cost you the whole page.
+        st.error("Could not read stored preferences.")
+        st.code(tb.format_exc())
+        rows = []
+    if rows:
+        for label, value, forgettable in rows:
             col_a, col_b = st.columns([3, 1])
-            col_a.write(f"**{key}**: {value}")
-            if col_b.button("forget", key=f"forget-{key}"):
-                memory.forget(key)
+            col_a.write(f"**{label}**: {value}" if forgettable
+                        else f"_{value}_")
+            # Notes get no forget button: they are shown to the model but
+            # never enforced, so offering to "forget" one would imply it had
+            # been changing your journeys.
+            if forgettable and col_b.button("forget", key=f"forget-{label}"):
+                memory.forget(label)
                 st.rerun()
     else:
         st.caption("_nothing remembered yet_")

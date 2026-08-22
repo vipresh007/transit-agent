@@ -145,12 +145,116 @@ def test_ui_only_reads_what_exists():
 
     # Cheap guard against renaming a field in plan.py and discovering it via
     # a traceback in the browser.
-    ui = (ROOT / "ui.py").read_text(encoding="utf-8")
+    # Both files: the pure logic moved into view.py, so checking ui.py alone
+    # would report a field as unused the moment it was properly factored out.
+    front_end = ((ROOT / "ui.py").read_text(encoding="utf-8")
+                 + (ROOT / "transit" / "pipeline" / "view.py").read_text(encoding="utf-8"))
     fields = set(plan_module.PlanResult.__dataclass_fields__) | {"flags"}
     for attribute in ("itinerary", "violations", "grounding", "research",
                       "no_schedule_data", "error", "flags"):
         check(f"PlanResult.{attribute} exists", attribute in fields)
-        check(f"and the UI uses it", f".{attribute}" in ui)
+        check(f"and the front end uses it", f".{attribute}" in front_end)
+
+
+def test_view_helpers_match_the_apis_they_call():
+    section("the UI's pure logic, where a test can reach it")
+
+    from transit.pipeline import view
+    from transit.tools import memory
+
+    # THE BUG THIS EXISTS FOR. The sidebar did `memory.load().items()`, but
+    # load() returns (preferences, notes). It crashed on first launch, and no
+    # test could have caught it: ui.py imports streamlit at module scope, so
+    # it cannot be imported at all. Untestable code is untested code.
+    loaded = memory.load()
+    check("memory.load() returns a pair", isinstance(loaded, tuple))
+    check("preferences are a dict", isinstance(loaded[0], dict))
+    check("notes are a list", isinstance(loaded[1], list))
+
+    rows = view.remembered_rows()
+    check("remembered_rows() returns rows", isinstance(rows, list))
+    check("each row is (label, value, forgettable)",
+          all(len(r) == 3 and isinstance(r[2], bool) for r in rows))
+    # Preferences are enforced; notes are only shown to the model. Offering to
+    # "forget" a note would imply it had been changing journeys.
+    check("notes are never forgettable",
+          [f for label, _, f in rows if label == "note"], [])
+
+
+class _FakeResult:
+    """badge_values only reads attributes, so this needs no pydantic."""
+
+    def __init__(self, **kw):
+        self.violations, self.no_schedule_data, self.grounding = [], False, {}
+        self.__dict__.update(kw)
+
+
+def test_badges_are_decided_once():
+    section("badge values")
+
+    from transit.pipeline import view
+
+    result = _FakeResult(grounding={"coverage": 1.0})
+    badges = view.badge_values(result)
+    check("a clean result says verified", badges["Schedule"], "verified")
+    check("and times came from the feed", badges["Times"], "from the feed")
+    check("and grounding is a percentage", badges["Grounding"], "100%")
+
+    result.no_schedule_data = True
+    # The distinction the whole project keeps relearning: unfounded is not the
+    # same as wrong, and it has to be said out loud or it reads as fine.
+    check("no retrieved times says ESTIMATED",
+          view.badge_values(result)["Times"], "ESTIMATED")
+
+    result.grounding = {}
+    check("missing grounding is a dash, not 0%",
+          view.badge_values(result)["Grounding"], "—")
+
+
+def test_counters_reset_between_runs():
+    section("a long-lived process must not accumulate")
+
+    from transit.core import cache, llm
+
+    # The CLI dies after one run, so module-level counters were fine. Streamlit
+    # keeps the process alive for hours, so without a reset the second question
+    # reports the first one's requests, tokens and seconds added to its own —
+    # totals that only ever climb, and a "slowest call" from an hour ago.
+    llm.USAGE.update(n=7, prompt_tokens=1234, completion_tokens=99)
+    llm.TIMING.update(model_seconds=42.0, wait_seconds=13.0, latencies=[1.0, 2.0])
+    cache.STATS.update(hits=3, misses=4)
+
+    llm.reset_run()
+
+    check("requests zeroed", llm.USAGE["n"], 0)
+    check("tokens zeroed", llm.USAGE["prompt_tokens"], 0)
+    check("model seconds zeroed", llm.TIMING["model_seconds"], 0.0)
+    check("waiting zeroed", llm.TIMING["wait_seconds"], 0.0)
+    check("latencies cleared", llm.TIMING["latencies"], [])
+    check("cache stats zeroed", cache.STATS["hits"], 0)
+
+
+def test_concurrency_is_declared_not_guessed():
+    section("parallelism is a fact, not an inference")
+
+    from transit.core import llm, trace
+
+    # Inferring "concurrent" from buckets-exceed-wall-clock called a
+    # single-threaded plan.py run 1.7x parallel. The buckets covered the whole
+    # pipeline; the wall clock covered only the last agent.run(), because
+    # agent.run() resets the trace each time. Two scopes, compared as one.
+    llm.reset_run()
+    llm.TIMING.update(model_seconds=600.0, wait_seconds=0.0)
+    events = [{"kind": "tool_call", "t": 1000.0, "seconds": 1.0, "tool": "a"},
+              {"kind": "final", "t": 1100.0}]
+
+    sequential = trace._timing(events, wall_seconds=100.0, concurrent=False)
+    check("buckets over the clock alone prove nothing",
+          sequential["concurrent"], False)
+
+    parallel = trace._timing(events, wall_seconds=100.0, concurrent=True)
+    check("a caller that fans out says so", parallel["concurrent"], True)
+    llm.reset_run()
 
 
 def test_the_cli_delegates_to_the_pipeline():
@@ -185,7 +289,11 @@ if __name__ == "__main__":
                test_a_broken_observer_cannot_kill_a_run,
                test_notify_does_not_pollute_the_trace,
                test_plan_returns_instead_of_printing,
-               test_ui_only_reads_what_exists):
+               test_ui_only_reads_what_exists,
+               test_view_helpers_match_the_apis_they_call,
+               test_badges_are_decided_once,
+               test_counters_reset_between_runs,
+               test_concurrency_is_declared_not_guessed):
         fn()
     from _harness import PASSED
     print(f"\n{PASSED['n']} checks passed")

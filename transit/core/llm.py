@@ -64,6 +64,23 @@ def reset_timing() -> None:
                   latencies=[])
 
 
+def reset_run() -> None:
+    """Zero every per-run counter. Call once at the start of a pipeline.
+
+    USAGE, TIMING and the cache stats are module globals, which is fine for a
+    command-line program: the process dies after one run. Streamlit's process
+    lives for hours across many runs, so without this the second question
+    reports the first one's requests, tokens and seconds added to its own —
+    the totals only ever climb.
+
+    Same shape as every other global-state bug in this project: state scoped
+    to the process, used as though it were scoped to the operation.
+    """
+    USAGE.update(n=0, prompt_tokens=0, completion_tokens=0)
+    reset_timing()
+    cache.STATS.update(hits=0, misses=0)
+
+
 def _slept(seconds: float, bucket: str = "wait_seconds") -> None:
     """Sleep, and remember that we did. Every sleep site routes through here
     so no waiting can go unaccounted for."""

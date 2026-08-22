@@ -49,6 +49,10 @@ PROVIDERS = [
 _chosen = None
 
 
+
+class NoEmbeddingProvider(RuntimeError):
+    """No reachable embedder. Raised on use, never at import."""
+
 def _reachable(prov: dict) -> bool:
     if prov["key_env"]:
         return bool(os.getenv(prov["key_env"]))
@@ -78,7 +82,11 @@ def provider() -> dict:
                 _chosen = prov
                 break
         else:
-            sys.exit(
+            # Raise, don't exit. sys.exit() here would kill whatever imported
+            # this — and since SystemExit is a BaseException, an `except
+            # Exception` guard in a caller sails right past it. providers.py
+            # had the same line and it cost a silently hanging web page.
+            raise NoEmbeddingProvider(
                 "No embedding provider available.\n"
                 "  - Start Ollama and run: ollama pull nomic-embed-text\n"
                 "  - or set MISTRAL_API_KEY / GEMINI_API_KEY in .env"

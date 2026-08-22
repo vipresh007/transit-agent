@@ -21,6 +21,7 @@ pattern you'll build in this project.
 import json
 import re
 import sys
+import time
 from dataclasses import dataclass, field
 
 from pydantic import ValidationError
@@ -296,6 +297,12 @@ class PlanResult:
 def plan(question: str, prefs: constraints.Preferences | None = None,
          verbose: bool = True, record: bool = True) -> PlanResult:
     """Research, structure, verify, repair. Returns; does not print."""
+    # Zero the per-run counters. Harmless on the command line, essential in
+    # Streamlit: that process survives many questions, and without this the
+    # second one reports the first one's tokens and seconds too.
+    llm.reset_run()
+    started = time.perf_counter()
+
     if prefs is None:
         # Environment first, then memory fills the gaps. Precedence matters:
         # what the traveller says NOW must beat what they said last week, or
@@ -374,9 +381,15 @@ def plan(question: str, prefs: constraints.Preferences | None = None,
     result.grounding = grounding.check(result.itinerary.render(), result.sources)
 
     if record:
+        # Our own wall clock, not one derived from trace events. agent.run()
+        # resets the trace on every call, so by the time we write, EVENTS holds
+        # only the LAST run — the structuring and repair passes fall outside
+        # it. Deriving the wall clock from that span made the totals exceed it
+        # and the reporter announced 1.7x parallelism on a sequential run.
         result.trace_path = agent.write_trace(
             question,
             answer=result.itinerary.render(),
+            wall_seconds=time.perf_counter() - started,
             extra={
                 "research_notes": research,
                 "itinerary": result.itinerary.model_dump(),

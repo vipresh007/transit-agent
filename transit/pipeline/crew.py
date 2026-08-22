@@ -36,9 +36,6 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from dotenv import load_dotenv
-
-load_dotenv()
 
 from transit.core import agent          # noqa: E402
 from transit.verify import constraints    # noqa: E402
@@ -281,7 +278,7 @@ def main() -> None:
         question, answer,
         provider=providers.current()["name"], model=providers.model(),
         usage=llm.USAGE, cache_stats={}, flags={"subtasks": len(tasks)},
-        events=merged, wall_seconds=elapsed,
+        events=merged, wall_seconds=elapsed, concurrent=True,
         extra={
             "phase": "crew",
             "subtasks": [

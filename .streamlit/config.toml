@@ -1,0 +1,13 @@
+# Streamlit watches the project tree to hot-reload on save. data/ holds a
+# 561 MB SQLite database and a 34 MB zip, and walking those on every reload
+# is enough to leave the page blank with nothing in the terminal — the server
+# starts, the script never finishes, and no error is ever printed.
+#
+# "poll" watches by timestamp instead of registering OS-level handles, which
+# is cheap regardless of file size. Use "none" if you'd rather restart by hand.
+[server]
+fileWatcherType = "poll"
+folderWatchDenylist = ["data", "traces", ".cache", ".git", ".venv"]
+
+[browser]
+gatherUsageStats = false
