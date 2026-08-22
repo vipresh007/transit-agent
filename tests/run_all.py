@@ -2,7 +2,8 @@
 
     python tests/run_all.py
 
-Eight suites:
+Nine suites:
+    test_imports   static: do all imports resolve, no dangling references
     test_tools     tool logic + SQL against transit.db
     test_agent     loop mechanics with a scripted fake model
     test_grounding whether an answer's specifics trace to its sources
@@ -24,6 +25,9 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 
 SUITES = [
+    # Static first: it costs 0.2s and catches the refactor breakage that
+    # every behavioural suite below would sail past.
+    ("imports", [sys.executable, str(HERE / "test_imports.py")], HERE),
     ("tool logic", [sys.executable, str(HERE / "test_tools.py")], HERE),
     ("agent loop", [sys.executable, str(HERE / "test_agent.py")], HERE),
     ("grounding", [sys.executable, str(HERE / "test_grounding.py")], HERE),
@@ -31,7 +35,7 @@ SUITES = [
     ("memory", [sys.executable, str(HERE / "test_memory.py")], HERE),
     ("crew", [sys.executable, str(HERE / "test_crew.py")], HERE),
     ("langgraph port", [sys.executable, str(HERE / "test_graph.py")], HERE),
-    ("eval checkers", [sys.executable, str(ROOT / "evals.py"), "--selftest"], ROOT),
+    ("eval checkers", [sys.executable, "-m", "transit.pipeline.evals", "--selftest"], ROOT),
 ]
 
 

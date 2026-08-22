@@ -11,6 +11,7 @@ import json
 import os
 import sqlite3
 
+from transit import paths
 from .transit import DB_PATH, find_nearby_stops
 
 def _shift(t: str, minutes: int) -> str:
@@ -124,7 +125,7 @@ def plan_journey(
     over candidate stops rather than pick one.
     """
     if not os.path.exists(DB_PATH):
-        return f"{DB_PATH} not found. Run `python load_gtfs.py` first."
+        return f"{DB_PATH} not found. Run `python scripts/load_gtfs.py` first."
 
     # Reject placeholder coordinates. The model called this with (0, 0) before
     # geocoding anything -- a wasted request that silently returned "no stops
@@ -141,7 +142,7 @@ def plan_journey(
                 f"coordinates, then call plan_journey with those."
             )
 
-    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    conn = sqlite3.connect(paths.readonly_uri(DB_PATH), uri=True)
     try:
         # Candidate counts are a speed/quality tradeoff, and cutting them was
         # the wrong lever: trimming destinations to 2 dropped Distillery Loop

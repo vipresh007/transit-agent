@@ -12,7 +12,7 @@ Layout:
     registry.py  schemas + dispatch table
 
 Import from the package, not the submodules:
-    from tools import TOOL_FUNCTIONS, TOOL_SCHEMAS, SCHEDULE_TOOLS
+    from transit.tools import TOOL_FUNCTIONS, TOOL_SCHEMAS, SCHEDULE_TOOLS
 """
 
 from .geo import find_pois, geocode, get_weather

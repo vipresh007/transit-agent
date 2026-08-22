@@ -14,7 +14,7 @@ from _harness import check, section
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import grounding  # noqa: E402
+from transit.verify import grounding  # noqa: E402
 
 SOURCE = [
     "Kensington Market is, first and foremost, a market: bohemian, "

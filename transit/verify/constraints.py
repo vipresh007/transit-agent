@@ -26,8 +26,9 @@ import os
 import re
 import sqlite3
 from dataclasses import dataclass, field
+from transit import paths
 
-DB_PATH = "transit.db"
+DB_PATH = paths.TRANSIT_DB
 
 # Walking faster than this is not walking. 5 km/h is a brisk pace; 7 allows
 # for imprecise stop coordinates without waving through a claimed sprint.
@@ -91,7 +92,7 @@ def _seconds(t: str) -> int:
 
 
 def _conn():
-    return sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    return sqlite3.connect(paths.readonly_uri(DB_PATH), uri=True)
 
 
 # ---------------------------------------------------------------------------

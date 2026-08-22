@@ -26,8 +26,9 @@ import json
 import os
 import sqlite3
 import time
+from transit import paths
 
-DB_PATH = os.getenv("MEMORY_DB", "memory.db")
+DB_PATH = paths.MEMORY_DB
 
 # The keys that map onto constraints.Preferences. Free-form facts go to notes.
 # A fixed vocabulary is what lets stored memory become enforced constraints
@@ -45,7 +46,7 @@ def _conn(readonly: bool = False):
     if readonly and not os.path.exists(DB_PATH):
         return None
     conn = sqlite3.connect(
-        f"file:{DB_PATH}?mode=ro" if readonly else DB_PATH, uri=readonly
+        paths.readonly_uri(DB_PATH) if readonly else DB_PATH, uri=readonly
     )
     if not readonly:
         conn.executescript("""

@@ -18,10 +18,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)  # tools resolve transit.db relative to the working directory
 
-import tools                                      # noqa: E402
-from tools.journey import _shift, _with_walks     # noqa: E402
+from transit import tools                                      # noqa: E402
+from transit.tools.journey import _shift, _with_walks     # noqa: E402
+from transit import paths
 
-HAS_DB = Path(ROOT / "transit.db").exists()
+HAS_DB = paths.TRANSIT_DB.exists()
 
 
 def test_registry():
@@ -105,7 +106,7 @@ def test_input_validation():
 def test_against_database():
     section("queries against transit.db")
     if not HAS_DB:
-        print("  (skipped: transit.db not built — run python load_gtfs.py)")
+        print("  (skipped: transit.db not built — run python scripts/load_gtfs.py)")
         return
 
     doc = tools.describe_transit_schema()

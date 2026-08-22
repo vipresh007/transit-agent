@@ -29,7 +29,7 @@ from pathlib import Path
 
 from openai.types.chat import ChatCompletion
 
-from tools import TOOL_SCHEMAS
+from transit.tools import TOOL_SCHEMAS
 
 ENABLED = os.getenv("CACHE") == "1"
 CACHE_DIR = Path(os.getenv("CACHE_DIR", ".cache"))

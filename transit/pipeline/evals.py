@@ -33,17 +33,18 @@ import re
 import sqlite3
 import sys
 import time
+from transit import paths
 
 # agent/llm are imported lazily inside main(), not at module scope. They pull
 # in the OpenAI SDK, and --selftest advertises itself as needing no API access
 # — so it must not require the SDK to be installed either. A "free, offline"
 # check that fails on an import is not offline.
-DB = "transit.db"
+DB = paths.TRANSIT_DB
 
 
 def q1(sql: str):
     """Run a reference query and return the first row."""
-    conn = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    conn = sqlite3.connect(paths.readonly_uri(DB), uri=True)
     try:
         return conn.execute(sql).fetchone()
     finally:
@@ -149,7 +150,7 @@ def case_earliest_501():
 
 def case_subway_lines():
     """Three subway lines exist. Tests basic retrieval, not reasoning."""
-    conn = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    conn = sqlite3.connect(paths.readonly_uri(DB), uri=True)
     names = [r[0] for r in conn.execute(
         "SELECT route_long_name FROM routes WHERE route_type = '1'")]
     conn.close()
@@ -241,7 +242,7 @@ def case_journey():
           AND r.route_short_name = ?
           AND substr('0' || st.departure_time, -8) >= ?
     """
-    conn = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    conn = sqlite3.connect(paths.readonly_uri(DB), uri=True)
     try:
         _, board = conn.execute(leg, ("8128", "510", "08:00:00")).fetchone()
     finally:
@@ -267,7 +268,7 @@ def case_journey():
 
 def _guides_ready() -> bool:
     import os
-    return os.path.exists("guides.db")
+    return os.path.exists(paths.GUIDES_DB)
 
 
 def case_guide_character():
@@ -279,7 +280,7 @@ def case_guide_character():
     corpus is the check — an answer built from the guides will echo some of
     it; an answer from the model's own knowledge of Toronto probably won't.
     """
-    conn = sqlite3.connect(f"file:guides.db?mode=ro", uri=True)
+    conn = sqlite3.connect(paths.readonly_uri(paths.GUIDES_DB), uri=True)
     try:
         row = conn.execute(
             "SELECT text FROM chunks WHERE article LIKE '%Kensington%' "
@@ -442,8 +443,8 @@ def main() -> None:
               f"(~{len(CASES) * 5} total).")
         return
 
-    import agent   # noqa: PLC0415 — deliberately deferred, see note above
-    import llm     # noqa: PLC0415
+    from transit.core import agent   # noqa: PLC0415 — deliberately deferred, see note above
+    from transit.core import llm     # noqa: PLC0415
 
     selected = args.only or list(CASES)
     print(f"Running {len(selected)} case(s). Estimated ~{len(selected) * 5} requests.\n")
@@ -488,7 +489,7 @@ def main() -> None:
         if error and any(k in error for k in ("Quota", "NotFound", "Authentication")):
             print(f"Stopping: environment problem, not an agent failure.\n"
                   f"  {error.splitlines()[0]}\n"
-                  f"  Try: python list_models.py")
+                  f"  Try: python scripts/list_models.py")
             break
 
     passed = sum(p for _, p in results)

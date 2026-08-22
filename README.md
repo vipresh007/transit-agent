@@ -1,259 +1,226 @@
 # Toronto transit & trip planning agent
 
-A learning project. Build an agent that plans a day in Toronto using real
-transit schedules, real opening hours, and real weather — on entirely free
-data, with no paid services anywhere in the stack.
+A learning project: an agent that plans a day in Toronto using real transit
+schedules, opening hours and weather — on entirely free services.
 
-The point isn't the trip planner. The point is that each stage forces you to
-learn one concept properly, and every stage produces something that runs.
+The point isn't the trip planner. Each stage teaches one concept and produces
+something that runs.
 
 ## Setup
 
 ```bash
-git clone <your-repo-url>
-cd transit-agent
-
 python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
+source .venv/bin/activate            # Windows: .venv\Scripts\activate.bat
 pip install -r requirements.txt
+cp .env.example .env                 # paste your Gemini key in
 
-cp .env.example .env               # then paste your Gemini key into .env
-python agent.py "what should I do in Toronto tomorrow?"
+python scripts/load_gtfs.py          # TTC schedule -> data/transit.db  (~3 min)
+python scripts/optimize_db.py        # indexes the journey planner needs
+ollama pull nomic-embed-text         # local embedding model
+python scripts/load_guides.py        # Wikivoyage -> data/guides.db     (~6 min)
+python tests/run_all.py              # verify, free
 ```
 
-You should see tool calls printed to stderr, then an answer. If the agent
-answers without calling any tools, that's the first thing worth debugging —
-usually a tool description in `tools/registry.py` isn't specific enough.
+Get a Gemini key at https://aistudio.google.com/apikey — no card needed. Free
+tiers move constantly; three model names here broke within a week. Run
+`python scripts/list_models.py` to see what your keys actually serve, and avoid
+`-latest` aliases — they resolve to the newest model, which has the smallest
+quota. Providers are tried in order and fail over on a quota wall;
+`PROVIDER=groq` pins one (and makes the response cache usable).
 
-Full setup, in order:
+## Which script do I run?
 
-```bash
-python load_gtfs.py                 # TTC schedule -> transit.db  (~3 min)
-python optimize_db.py               # indexes the journey planner needs
-ollama pull nomic-embed-text        # local embedding model
-python load_guides.py               # Wikivoyage -> guides.db     (~6 min)
-python tests/run_all.py             # verify, free
+Layers, not alternatives — each calls the one below. Pick one per question.
+
+| Run this | When | What it adds |
+|---|---|---|
+| `python agent.py "..."` | debugging a tool | the raw loop, prose answer |
+| `python plan.py "..."` | one A-to-B journey | typed itinerary, constraint checks, repair, memory |
+| `python crew.py "..."` | several *independent* questions | parallel subagents + synthesis |
+| `python graph.py "..."` | same as crew, via LangGraph | checkpointing, approval pauses |
+
+`crew.py` and `graph.py` call `agent.run()` directly, so they skip the typing
+and schedule verification `plan.py` adds — their answers are grounded but not
+checked against the timetable.
+
+Everything in `scripts/` runs once at setup. `tests/run_all.py` runs after code
+changes. `python -m transit.pipeline.evals` spends quota; run it on purpose.
+
+## Layout
+
+```
+agent.py  plan.py  crew.py  graph.py   three-line launchers, nothing else
+transit/
+  paths.py      every file the project reads or writes, absolute
+  core/         agent, llm, providers, cache, trace, threadstate, embeddings
+  tools/        geo, transit, journey, guides, memory, registry
+  verify/       constraints, grounding, schemas
+  pipeline/     plan, crew, graph, evals
+scripts/        load_gtfs, load_guides, optimize_db, list_models
+data/           databases and downloads (gitignored)
+tests/
 ```
 
-## Getting a Gemini API key (free, no card)
+Start at `transit/core/agent.py` — the loop and its guardrails.
 
-1. Go to https://aistudio.google.com/apikey and sign in with a Google account.
-2. Click **Create API key**. Pick an existing Google Cloud project or let it
-   make one. You do not need to enable billing.
-3. Copy the key into `.env`.
-
-Free tiers move constantly — three model names in this project broke within a
-week. Run `python list_models.py` to see what your keys actually serve, and
-avoid `-latest` aliases: they resolve to the newest model, which is the one
-with the smallest free quota.
-
-Providers are configured in `.env` and tried in order, so a quota wall fails
-over instead of ending the run. `PROVIDER=groq` pins one (and makes the
-response cache usable, since the model name is part of the cache key).
-
-## Files
-
-| File | What's in it |
-|---|---|
-| `agent.py` | The loop and its guardrails. Start here. |
-| `providers.py` | Which model, failover order, pacing. Accessors, not globals. |
-| `llm.py` | Retries, rate limits, quota, token accounting. |
-| `cache.py` | Replaying identical requests during iteration. |
-| `trace.py` | The JSON record written to `traces/` on every run. |
-| `tools/geo.py` | Geocoding, weather, POIs (external APIs). |
-| `tools/transit.py` | GTFS schema access and stop/trip lookups. |
-| `tools/journey.py` | End-to-end journey planning with transfers. |
-| `tools/guides.py` | Hybrid retrieval over the Wikivoyage guides. |
-| `embeddings.py` | Provider-agnostic embedding (Ollama, Mistral, Gemini). |
-| `tools/registry.py` | Tool schemas + dispatch table. |
-| `schemas.py` | The typed `Itinerary` and its validators. |
-| `plan.py` | Two-phase research → structured itinerary. |
-| `constraints.py` | Is the itinerary possible? Checked against the DB. |
-| `grounding.py` | Do the answer's specifics trace to retrieved text? |
-| `memory.py` | Standing preferences that survive between sessions. |
-| `crew.py` | Plan → parallel subagents → synthesise. |
-| `threadstate.py` | Per-thread run state, so subagents don't collide. |
-| `evals.py` | Test suite, plus `--selftest` for the checkers. |
-
-Scripts: `load_gtfs.py` (build the transit DB), `load_guides.py` (build the
-guide index), `optimize_db.py` (add indexes),
-`list_models.py` (what your keys can actually use).
+**Dependencies point one way:** `pipeline → verify → tools → core`, with two
+deferred imports inside functions as documented exceptions. `memory.py` lives
+in `tools/` because the agent calls `remember`/`recall` as tools; in
+`pipeline/` it inverted the layering.
 
 ## Tests
 
 ```bash
-python tests/run_all.py     # everything offline: no API key, no quota
+python tests/run_all.py     # nine suites, offline, no API key, no quota
 ```
 
-Three suites, all free:
+`_harness.py` stubs the OpenAI SDK before any project module loads, so the loop
+runs against a scripted fake model — the only way to test "the model emitted
+malformed tool-call JSON" or "the provider hit its daily quota mid-conversation"
+on demand. Every check in `test_agent.py` matches a bug that actually happened;
+the comments say which.
 
-| Suite | Covers |
-|---|---|
-| `tests/test_tools.py` | tool logic, GTFS time arithmetic, SQL guardrails |
-| `tests/test_agent.py` | retries, failover, throttling, the loop's guardrails |
-| `evals.py --selftest` | whether the eval checkers themselves work |
+`test_imports.py` is static and runs first. It exists because the package
+reorganisation left `journey.py` calling `paths.readonly_uri()` without
+importing `paths`. All eight other suites passed — the bug sat inside a
+function body on the one path they skip, since exercising it needs a 4.2M-row
+database. It surfaced as a live run that spent 36 requests inventing a midnight
+departure. **Behavioural tests only cover code they run, and the expensive
+paths are the ones they skip.**
 
-`tests/_harness.py` stubs the OpenAI SDK before any project module loads, so
-the loop runs against a scripted fake model. That's the only way to test
-things like "the model emitted malformed tool-call JSON" or "the provider ran
-out of daily quota mid-conversation" on demand.
+Cost money, so excluded: `tests/smoke_test.py` (hits the free APIs) and
+`python -m transit.pipeline.evals` (~35 model requests).
 
-Every check in `test_agent.py` corresponds to a bug that actually happened.
-The comments say which.
+## Stages
 
-Not included, because they cost something:
+**1 — the agent loop.** Tool calling, dispatch, feeding errors back, a step cap.
 
-```bash
-python tests/smoke_test.py   # hits Nominatim/Open-Meteo/Overpass
-python evals.py              # spends model quota (~35 requests)
-```
+**2 — GTFS in SQLite.** `describe_transit_schema` + `query_transit` (read-only).
+The agent writes its own SQL, gets errors back as text, and retries.
 
-**Why this shape.** `agent.py` and `tools.py` both hit ~950 lines doing five
-jobs each. The split isn't cosmetic: `providers.py` exposes `current()` and
-`model()` as *functions* because failover reassigns the active provider at
-runtime, and the old module-level `provider` variable produced a real bug —
-`from agent import provider` bound the stale value and the footer reported
-the wrong model for a whole run. Functions can't go stale.
+**4 — evaluation** *(built early, out of order, and it should have been)*.
+Ground truth computed from the database at run time, not hardcoded, so the
+suite survives the TTC's six-week republish. Includes a hallucination check and
+a known-failing case.
 
-## Free data sources
-
-| Source | Use | Key needed |
-|---|---|---|
-| [Nominatim](https://nominatim.openstreetmap.org) | Geocoding | No (1 req/sec, set a User-Agent) |
-| [Open-Meteo](https://open-meteo.com) | Weather forecast | No |
-| [Overpass](https://overpass-api.de) | POIs, opening hours | No (few hundred queries/day) |
-| [TTC GTFS](https://open.toronto.ca/dataset/ttc-routes-and-schedules/) | Toronto schedules | No — a zip of CSVs |
-| [TTC GTFS-RT](https://open.toronto.ca/dataset/ttc-gtfs-realtime-gtfs-rt/) | Live alerts & delays | No |
-| [Transitland](https://www.transit.land) | Feeds for other cities | Free key |
-| [Wikivoyage dumps](https://dumps.wikimedia.org/enwikivoyage/) | Travel guide text (RAG corpus) | No |
-
-## Roadmap
-
-Each stage is roughly a sitting, and each one teaches exactly one thing.
-
-**Stage 1 — the agent loop** ✅ *(this code)*
-Tool calling, dispatch, feeding errors back to the model, a step cap.
-Read `agent.py` top to bottom before moving on.
-
-**Stage 2 — GTFS in SQLite** ✅
-`python load_gtfs.py` pulls the current TTC feed and loads it into
-`transit.db`. The agent gets two new tools: `describe_transit_schema` and
-`query_transit` (read-only SELECT). It writes its own SQL, gets errors back as
-text, and retries — self-correction with a real feedback signal.
-
-**Stage 4 — evaluation** ✅ *(done early, out of order — and it should have been)*
-`python evals.py`. Six cases with ground truth computed from the database at
-run time, not hardcoded, so the suite survives the TTC's six-week republish.
-Includes a hallucination check (asks for fare data the feed doesn't contain)
-and a known-failing case (`calendar_dates` exceptions).
-
-**Stage 3 — structured output** ✅
-`python plan.py "how do I get from A to B?"`. Two phases: research with tools,
-then a toolless structuring pass that emits JSON validated against the
-`Itinerary` model in `schemas.py`. Validation errors are fed back with the
+**3 — structured output.** Research with tools, then a toolless pass emitting
+JSON validated against `Itinerary`. Validation errors go back with the
 offending field named — self-correction against a perfect grader.
 
-**Stage 5 — RAG over Wikivoyage** ✅
-`ollama pull nomic-embed-text` then `python load_guides.py`. Chunks on section
-boundaries (not character counts), embeds locally, stores vectors as blobs in
-SQLite. `search_guides` does hybrid retrieval — dense + FTS5, fused with
-Reciprocal Rank Fusion — with a relevance floor so out-of-corpus questions
-return "nothing here" instead of the nearest weak match.
+**5 — RAG over Wikivoyage.** Chunks on section boundaries, embeds locally,
+hybrid dense + FTS5 fused with Reciprocal Rank Fusion, with a relevance floor so
+out-of-corpus questions return "nothing here". Measured, not assumed:
+`tests/check_retrieval.py` runs an ablation — the two retrievers disagree on 5
+of 9 probes, and dense alone answered "somewhere to eat late at night" with a
+bed & breakfast section.
 
-Measured, not assumed: `python tests/check_retrieval.py` runs probes and an
-ablation. On this corpus the two retrievers pick different top results on 5 of
-9 probes — dense alone answered "somewhere to eat late at night" with a bed &
-breakfast section, having latched onto "night".
+**6 — agentic RAG.** Retrieval reports a quality band and `suggested_terms`, so
+the agent can react to a bad result instead of treating 0.56 like 0.83.
+Grounding checks whether specifics trace back to tool output.
 
-**Stage 6 — agentic RAG** ✅
-`search_guides` now reports a quality band (strong / moderate / weak /
-nothing-relevant) plus `suggested_terms` drawn from real section headings, so
-the agent can react to bad retrieval instead of treating a 0.56 match like a
-0.83 one. `grounding.py` checks whether an answer's specifics trace back to
-what the tools returned, and `agent.py` pushes back once if they don't.
+Honest finding: query rewriting earned little — models expand queries natively.
+Grounding earned a lot: one run named nine venues found nowhere in the retrieved
+text and closed with "all of the venues above are listed in the guides, so you
+can trust the opening hours". Inventing a venue is bad; asserting a source for
+the invention is worse.
 
-The honest finding: query rewriting earned less than expected. Asked about a
-"rainy day" — a phrase appearing zero times in the corpus — the model expanded
-to "museum gallery indoor attractions" on its own and scored 0.74 first try.
-Modern models do query expansion natively.
+**7 — replanning against constraints.** Does that departure exist, is one minute
+enough to change vehicles, can a person walk 1km in 2 minutes. Violations go back
+to the agent *with tools*, because fixing "only 1 min to make the 504" needs a
+new lookup. A repair is only accepted if it reduces the violation count.
 
-Grounding earned much more. That same run named nine venues found nowhere in
-the retrieved text (Eaton Centre, Mirvish, Yorkdale...) and closed with "all
-of the venues above are listed in the Wikivoyage guides, so you can trust the
-opening-hour details". Inventing venues is bad; asserting a source for the
-invention is worse, and it's why `PROVENANCE_CLAIM` exists.
+**8 — memory.** Standing preferences merged into `Preferences` at plan time, so
+a remembered "avoid buses" becomes an enforced constraint rather than more
+prompt text. `scope` is required: `standing` persists, `trip` refuses loudly —
+saving "I need to be there by 3pm" means every future journey silently inherits
+a deadline nothing explains. Environment beats memory, always.
 
-**Stage 7 — replanning against real constraints** ✅
-`constraints.py` verifies an itinerary against the schedule and the
-traveller's preferences: does that departure exist, is one minute enough to
-change vehicles, can a person walk 1km in 2 minutes, does the route run today.
-Violations go back to the agent WITH TOOLS (`repair()` in `plan.py`), because
-fixing "only 1 min to make the 504" needs a new lookup, not a reworded JSON.
+**9 — multi-agent.** Planner decomposes into independent subtasks, each runs as
+its own agent with fresh context, a synthesiser merges them. **Context isolation
+is the point; parallelism is a bonus.** Not a general upgrade: four subtasks cost
+~26 requests where one agent might use 8. Forced `threadstate.py`, because two
+subagents writing to the same module-level dict produced no crash — just a trace
+mixing conversations.
 
-The repair loop only accepts a fix that reduces the violation count — without
-that, a "repair" trading two problems for three passes as progress.
+**10 — the same thing in LangGraph.** `pip install langgraph
+langgraph-checkpoint-sqlite`, then `python graph.py --draw`.
 
-Preferences come from `.env`: `PREF_EARLIEST`, `PREF_LATEST`,
-`PREF_MIN_TRANSFER`, `PREF_MAX_TRANSFERS`, `PREF_AVOID`. They're stated in the
-prompt *and* checked afterwards — stating them avoids repair rounds, checking
-them catches the times stating didn't work.
+```
+START → plan ──fan_out──▶ research ×N ──▶ synthesize → END
+                │
+     (--approve) └─▶ approve ─┬─▶ research ×N
+                              └─▶ cancelled → END
+```
 
-**Stage 8 — memory** ✅
-`memory.py` stores standing preferences in `memory.db` and merges them into
-`constraints.Preferences` at plan time, so a remembered "avoid buses" becomes
-an *enforced* constraint rather than more prompt text.
+Buys: checkpointing (a run that dies at subtask 3 resumes at subtask 3),
+`interrupt()` for approval before spending, state history, a generated diagram.
+Costs: control flow becomes data, which is why `--draw` exists.
 
-The load-bearing design choice is `scope`, and it's a required field:
-`standing` persists, `trip` explicitly does not. "I'd rather walk than take a
-bus" is durable; "I need to be there by 3pm" is not, and saving it means every
-future journey silently inherits a 3pm deadline that nothing in the next
-conversation explains. `remember(scope='trip')` refuses, loudly, and says why.
+Two bugs it caused, both the same lesson — *durable state outlives the code that
+made it, so anything the state assumes has to be part of its key*: an
+`operator.add` reducer makes state append-only, so re-running a finished thread
+merged six sections instead of three; and a checkpoint isn't bound to the graph
+that wrote it, so a run paused at `approve` was resumed by a graph without that
+node and the pause silently stopped existing.
 
-Precedence: environment and CLI beat memory. What the traveller says now must
-override what they said last week, or stored memory becomes impossible to
-escape without editing a database.
-Persist preferences across sessions. "No early mornings", "vegetarian",
-"I'd rather walk than take a bus."
-
-**Stage 9 — multi-agent** ✅
-`python crew.py "plan me a Saturday in Toronto"`. A planner decomposes the
-question into independent subtasks, each runs as its own agent in its own
-thread with a fresh context, and a synthesiser merges them.
-
-**Context isolation is the point; parallelism is a bonus.** A single agent
-planning a whole day accumulates every tool result from every part of it, and
-by the afternoon its context is mostly morning.
-
-**It is not a general upgrade.** Four subtasks cost roughly 26 requests where
-one agent might use 8. It only pays when the parts are genuinely independent —
-"where should I eat, and how do I get there from the museum?" is sequential,
-and the planner is told to merge rather than fake a split.
-
-This stage forced `threadstate.py`. `LAST_RUN` and `trace.EVENTS` were module
-globals, so two subagents wrote into the same dict and list — no crash, just a
-trace mixing conversations and flags belonging to neither. Global mutable
-state is fine until you need two of something.
-One researcher per day of the trip running in parallel, a synthesizer merging
-them into one itinerary. Now compare hand-rolled vs LangGraph and you'll have
-earned an opinion.
+Verdict: checkpointing is real. Nothing else here would improve the agent, and
+the constraint checking, grounding and evals that make it trustworthy come from
+none of it. Port something you've hand-written if you want to judge a framework.
 
 ## Gotchas hit so far
 
-**`400 Function call is missing a thought_signature`**
-Gemini's thinking models sign their reasoning and attach it to tool calls in
-`tool_calls[N].extra_content.google.thought_signature` — a field the OpenAI
-schema knows nothing about. Rebuilding the assistant message by hand drops it,
-and the next turn is rejected. Fix: append `message.model_dump()` instead, so
-provider extras round-trip. Escape hatch: `THINKING_BUDGET=0` in `.env`.
+**`400 Function call is missing a thought_signature`** — Gemini signs its
+reasoning into `tool_calls[N].extra_content`, a field the OpenAI schema doesn't
+know. Rebuilding the assistant message by hand drops it. Append
+`message.model_dump()` instead. "OpenAI-compatible" is not drop-in.
 
-This is the general shape of the tradeoff with compatibility layers — portable
-code, but provider-specific features leak. Worth remembering before you assume
-"OpenAI-compatible" means drop-in.
+**GTFS times aren't zero-padded** — 863,539 of 4.2M rows store `8:03:31`, so
+comparing against `'08:03:31'` silently misses them. Use
+`substr('0' || departure_time, -8)`.
+
+**Whitelist provider fields** — Groq returns a `reasoning` field that 422s
+Mistral on failover. A blacklist is always one release behind.
+
+**Compute from mutable state at the point of use** — three bugs, one cause:
+`from agent import provider` bound a stale value, `trace.EVENTS` was read after
+a reset, and `sanitize()` ran once before the retry loop and resent a
+Gemini-shaped payload to Mistral.
+
+**A guard's precision matters more than its recall** — grounding flagged
+markdown headings, and the agent complied by *deleting the walking legs*. A
+checker that fires on correct answers is worse than none, because the agent
+obeys it.
+
+**Make absence representable** — zero rows vs "no service"; finished vs
+established something; rate limit vs dead quota. `legs` had `min_length=1`, so
+asked for a bus-free route to a bus-only destination the model emitted a
+zero-minute walk and wrote *"a placeholder to satisfy schema requirements"*.
+
+**Normalise before comparing strings** — Unicode broke comparison three times:
+curly apostrophes, em-dashes, U+202F narrow no-break space.
+
+**Windows** — `.ps1` does nothing in `cmd.exe` (use `activate.bat`); PowerShell's
+`del` wants commas, not spaces; the Store Python alias can shadow the venv;
+`winget`-installed `ollama` needs a fresh shell.
+
+## Free data sources
+
+| Source | Use | Key |
+|---|---|---|
+| [Nominatim](https://nominatim.openstreetmap.org) | Geocoding | No (1 req/sec, set a User-Agent) |
+| [Open-Meteo](https://open-meteo.com) | Weather | No |
+| [Overpass](https://overpass-api.de) | POIs, opening hours | No |
+| [TTC GTFS](https://open.toronto.ca/dataset/ttc-routes-and-schedules/) | Toronto schedules | No |
+| [Transitland](https://www.transit.land) | Feeds for other cities | Free key |
+| [Wikivoyage dumps](https://dumps.wikimedia.org/enwikivoyage/) | RAG corpus | No |
+
+Nominatim and Overpass are volunteer-run. Cache aggressively.
 
 ## Notes
 
-- Nominatim and Overpass are volunteer-run. Cache aggressively, don't hammer them.
-- GTFS times can exceed 24:00:00 (a 25:30:00 departure is 1:30am the next
-  service day). This will bite you in stage 2.
-- Keep `.env` out of git. The `.gitignore` handles it, but check `git status`
-  before your first push anyway.
+- Keep `.env` out of git. If a key lands in a chat, screenshot or commit,
+  **rotate it** — removing it later doesn't un-disclose it.
+- `langgraph` is optional. Only `graph.py` imports it, and `test_graph.py`
+  skips itself without it.
+- Everything in `data/` is gitignored. `transit.db` and `guides.db` rebuild from
+  the scripts; `memory.db` and `graph.db` do not.

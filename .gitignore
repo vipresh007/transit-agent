@@ -1,22 +1,30 @@
+# Secrets. Check `git status` before your first push anyway.
 .env
+
+# Virtualenvs and bytecode
 .venv/
 venv/
 __pycache__/
 *.pyc
+
+# Everything generated lives in data/. Two kinds live there and they are not
+# equally replaceable:
+#   rebuildable  transit.db (scripts/load_gtfs.py), guides.db (load_guides.py),
+#                ttc_gtfs.zip and guides_raw.json (download caches)
+#   NOT rebuildable  memory.db (standing preferences), graph.db (resumable runs)
+# All of it is ignored, so a fresh clone starts empty — that's expected.
 data/
-*.zip
+
+# SQLite writes -wal and -shm sidecars next to any open database.
 *.db
+*.db-*
 *.sqlite
+
+# Run artefacts
+traces/
+.cache/
+
+# Editors
 .DS_Store
 .idea/
 .vscode/
-.cache/
-traces/
-tests/__pycache__/
-guides.db
-guides_raw.json
-memory.db
-
-# stage 10: langgraph checkpoints (SQLite writes -wal and -shm alongside)
-graph.db
-graph.db-*

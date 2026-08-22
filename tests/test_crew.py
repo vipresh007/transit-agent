@@ -26,8 +26,10 @@ tm=types.ModuleType("openai.types"); cm=types.ModuleType("openai.types.chat"); c
 sys.modules["openai"]=om; sys.modules["openai.types"]=tm; sys.modules["openai.types.chat"]=cm
 dm=types.ModuleType("dotenv"); dm.load_dotenv=lambda *a,**k: None; sys.modules["dotenv"]=dm
 os.environ.update(GEMINI_API_KEY="g", CACHE="0", TRACE_DIR="/tmp/crewtrace")
-import crew, agent, providers, llm
-
+from transit.pipeline import crew
+from transit.core import agent
+from transit.core import providers
+from transit.core import llm
 def says(t):
     m=MagicMock(); m.content=t; m.tool_calls=None
     m.model_dump=lambda exclude_none=False: {"role":"assistant","content":t}

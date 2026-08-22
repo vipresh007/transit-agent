@@ -13,7 +13,7 @@ import os
 import time
 from pathlib import Path
 
-from threadstate import ThreadLocalList
+from transit.core.threadstate import ThreadLocalList
 
 TRACE_DIR = Path(os.getenv("TRACE_DIR", "traces"))
 # Thread-local: stage 9 runs several agents at once, and a shared list

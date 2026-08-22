@@ -33,8 +33,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)
 
-import tools                       # noqa: E402
-from tools.guides import guides_status  # noqa: E402
+from transit import tools                       # noqa: E402
+from transit.tools.guides import guides_status  # noqa: E402
+from transit import paths
 
 PROBES = [
     ("exact name", "Distillery District"),
@@ -50,8 +51,8 @@ PROBES = [
 
 
 def main() -> None:
-    if not os.path.exists("guides.db"):
-        sys.exit("guides.db not found — run python load_guides.py first")
+    if not paths.GUIDES_DB.exists():
+        sys.exit("guides.db not found — run python scripts/load_guides.py first")
 
     print(guides_status())
     print()

@@ -17,8 +17,9 @@ questions, and a dedicated tool for anything it has demonstrably failed at.
 import json
 import os
 import sqlite3
+from transit import paths
 
-DB_PATH = "transit.db"
+DB_PATH = paths.TRANSIT_DB
 
 SCHEMA_DOC = """\
 SQLite database of the TTC GTFS feed. All columns are TEXT.
@@ -130,14 +131,14 @@ def find_nearby_stops(lat: float, lon: float, radius_m: int = 800) -> str:
     model flailing near the thing it can't do.
     """
     if not os.path.exists(DB_PATH):
-        return f"{DB_PATH} not found. Run `python load_gtfs.py` first."
+        return f"{DB_PATH} not found. Run `python scripts/load_gtfs.py` first."
 
     # Equirectangular approximation: fine at city scale and, unlike haversine,
     # expressible in plain SQL so SQLite can use it directly.
     deg_lat = radius_m / 111_320
     deg_lon = radius_m / (111_320 * 0.723)  # cos(43.65 degrees)
 
-    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    conn = sqlite3.connect(paths.readonly_uri(DB_PATH), uri=True)
     try:
         rows = conn.execute(
             """
@@ -209,9 +210,9 @@ def find_direct_trips(
     failure, and the message says so.
     """
     if not os.path.exists(DB_PATH):
-        return f"{DB_PATH} not found. Run `python load_gtfs.py` first."
+        return f"{DB_PATH} not found. Run `python scripts/load_gtfs.py` first."
 
-    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    conn = sqlite3.connect(paths.readonly_uri(DB_PATH), uri=True)
     try:
         rows = conn.execute(
             """
@@ -265,11 +266,11 @@ def describe_transit_schema() -> str:
     """
     if not os.path.exists(DB_PATH):
         return (
-            f"{DB_PATH} not found. Run `python load_gtfs.py` first to download "
+            f"{DB_PATH} not found. Run `python scripts/load_gtfs.py` first to download "
             "and load the TTC feed."
         )
 
-    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    conn = sqlite3.connect(paths.readonly_uri(DB_PATH), uri=True)
     try:
         cal = conn.execute(
             "SELECT service_id, monday, tuesday, wednesday, thursday, friday, "
@@ -307,7 +308,7 @@ LIVE FEED FACTS (read from your database just now — use these, do not guess)
 def query_transit(sql: str) -> str:
     """Run a read-only SELECT against the transit database."""
     if not os.path.exists(DB_PATH):
-        return f"{DB_PATH} not found. Run `python load_gtfs.py` first."
+        return f"{DB_PATH} not found. Run `python scripts/load_gtfs.py` first."
 
     cleaned = sql.strip().rstrip(";")
     if not cleaned.lower().startswith(("select", "with")):
@@ -324,7 +325,7 @@ def query_transit(sql: str) -> str:
         cleaned += " LIMIT 20"
 
     # Open read-only so a bad query can't damage the database.
-    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    conn = sqlite3.connect(paths.readonly_uri(DB_PATH), uri=True)
 
     # Abort runaway queries. Without this, one accidental cross join against
     # stop_times hangs the agent until the step cap saves you.
@@ -360,7 +361,7 @@ def check_mode_feasibility(lat: float, lon: float, avoid_modes: str) -> str:
     impossible request into an honest answer instead of 34 requests spent
     hunting for a route that cannot exist.
     """
-    import constraints
+    from transit.verify import constraints
 
     modes = [m.strip() for m in (avoid_modes or "").split(",") if m.strip()]
     if not modes:

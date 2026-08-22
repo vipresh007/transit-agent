@@ -24,8 +24,8 @@ sys.path.insert(0, str(ROOT))
 _tmp = tempfile.mkdtemp()
 os.environ["MEMORY_DB"] = str(Path(_tmp) / "memory.db")
 
-import constraints  # noqa: E402
-import memory       # noqa: E402
+from transit.verify import constraints  # noqa: E402
+from transit.tools import memory       # noqa: E402
 
 
 def reset():

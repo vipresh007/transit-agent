@@ -25,8 +25,9 @@ import math
 import os
 import sqlite3
 import struct
+from transit import paths
 
-DB_PATH = "guides.db"
+DB_PATH = paths.GUIDES_DB
 
 # RRF constant. 60 is the value from the original paper and works fine; it
 # damps the influence of top ranks so one retriever can't dominate.
@@ -72,10 +73,10 @@ def guides_status() -> str:
     """What's indexed, or how to build it."""
     if not os.path.exists(DB_PATH):
         return (
-            f"{DB_PATH} not found. Run `python load_guides.py` to download and "
+            f"{DB_PATH} not found. Run `python scripts/load_guides.py` to download and "
             f"index the Wikivoyage Toronto guides."
         )
-    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    conn = sqlite3.connect(paths.readonly_uri(DB_PATH), uri=True)
     try:
         m = _meta(conn)
         arts = conn.execute(
@@ -96,13 +97,13 @@ def search_guides(query: str, limit: int = 4) -> str:
     if not os.path.exists(DB_PATH):
         return (
             f"{DB_PATH} not found — the travel guides are not indexed. "
-            f"Run `python load_guides.py`. Schedule questions do not need this "
+            f"Run `python scripts/load_guides.py`. Schedule questions do not need this "
             f"tool; use plan_journey or query_transit instead."
         )
 
-    import embeddings  # deferred: only needed when actually searching
+    from transit.core import embeddings  # deferred: only needed when actually searching
 
-    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    conn = sqlite3.connect(paths.readonly_uri(DB_PATH), uri=True)
     try:
         meta = _meta(conn)
         # Vectors from different models are not comparable. Mixing them
@@ -112,7 +113,7 @@ def search_guides(query: str, limit: int = 4) -> str:
                 f"Index was built with {meta.get('embed_model')} but the "
                 f"current embedding provider is {embeddings.model_name()}. "
                 f"Vectors from different models aren't comparable. Re-run "
-                f"`python load_guides.py`, or set EMBED_PROVIDER to match."
+                f"`python scripts/load_guides.py`, or set EMBED_PROVIDER to match."
             )
 
         dims = int(meta["dims"])
@@ -240,9 +241,9 @@ def compare_retrievers(query: str, limit: int = 3) -> dict:
     an eval suite exists to check. If the three columns agree on every query,
     the second retriever is costing complexity for nothing.
     """
-    import embeddings
+    from transit.core import embeddings
 
-    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    conn = sqlite3.connect(paths.readonly_uri(DB_PATH), uri=True)
     try:
         dims = int(_meta(conn)["dims"])
         qvec = embeddings.embed_one(query)

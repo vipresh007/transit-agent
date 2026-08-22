@@ -13,7 +13,7 @@ Three exports, and they must stay in sync:
 from .geo import POI_TAGS, find_pois, geocode, get_weather
 from .guides import guides_status, search_guides
 from .journey import plan_journey
-from memory import (
+from transit.tools.memory import (
     TOOL_FUNCTIONS as MEMORY_FUNCTIONS,
     TOOL_SCHEMAS as MEMORY_SCHEMAS,
 )

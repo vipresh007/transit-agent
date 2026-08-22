@@ -13,10 +13,10 @@ from _harness import calls, check, clean_env, install_fake_openai, says, section
 om = install_fake_openai()
 clean_env()
 
-import agent           # noqa: E402
-import cache           # noqa: E402
-import llm             # noqa: E402
-import providers       # noqa: E402
+from transit.core import agent           # noqa: E402
+from transit.core import cache           # noqa: E402
+from transit.core import llm             # noqa: E402
+from transit.core import providers       # noqa: E402
 
 DAILY = "429 quotaId: 'GenerateRequestsPerDayPerProjectPerModel-FreeTier'"
 MINUTE_WITH_DELAY = "429 Please retry in 3.5s."

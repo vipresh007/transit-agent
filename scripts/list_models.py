@@ -9,9 +9,16 @@ Model catalogues change monthly and differ per account. Don't guess — ask.
 Every OpenAI-compatible provider exposes GET /models, so one function covers
 all of them.
 
-    python list_models.py           # all configured providers
-    python list_models.py groq      # just one
+    python scripts/list_models.py           # all configured providers
+    python scripts/list_models.py groq      # just one
 """
+
+# Run either way: `python scripts/list_models.py` or `python -m scripts.load_gtfs`.
+# The first puts scripts/ on sys.path rather than the repo root, so `transit`
+# would not be importable without this.
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
 import re
 import sys
@@ -22,7 +29,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Imported after load_dotenv so the provider list reflects your .env.
-from providers import AVAILABLE  # noqa: E402
+from transit.core.providers import AVAILABLE  # noqa: E402
 
 import os  # noqa: E402
 

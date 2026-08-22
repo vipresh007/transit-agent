@@ -4,7 +4,7 @@ Add the journey-planner indexes to an existing transit.db.
 load_gtfs.py builds these now, but rebuilding costs a 33MB download and
 several minutes. This adds them in place, in about a minute.
 
-    python optimize_db.py
+    python scripts/optimize_db.py
 
 Why they matter: plan_journey self-joins stop_times to find every stop
 downstream of a given stop on the same trip. Over 4.2M rows with only
@@ -13,11 +13,19 @@ single-column indexes, SQLite scans; with a composite index covering
 a 17-second journey search and a 2-second one.
 """
 
+# Run either way: `python scripts/optimize_db.py` or `python -m scripts.load_gtfs`.
+# The first puts scripts/ on sys.path rather than the repo root, so `transit`
+# would not be importable without this.
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+
 import os
 import sqlite3
 import time
+from transit import paths
 
-DB = "transit.db"
+DB = paths.TRANSIT_DB
 
 INDEXES = [
     ("ix_st_trip_seq",
@@ -34,7 +42,7 @@ INDEXES = [
 
 def main() -> None:
     if not os.path.exists(DB):
-        raise SystemExit(f"{DB} not found. Run `python load_gtfs.py` first.")
+        raise SystemExit(f"{DB} not found. Run `python scripts/load_gtfs.py` first.")
 
     before = os.path.getsize(DB) >> 20
     conn = sqlite3.connect(DB)

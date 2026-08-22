@@ -5,11 +5,18 @@ GTFS is just a zip of CSVs with a documented schema. Every transit agency
 that publishes open data publishes this same shape, so what you learn here
 transfers to ~6000 other feeds worldwide.
 
-    python load_gtfs.py
+    python scripts/load_gtfs.py
 
 Downloads ~35 MB, produces transit.db (~1 GB, mostly stop_times). Takes a
 few minutes. Both are gitignored.
 """
+
+# Run either way: `python scripts/load_gtfs.py` or `python -m scripts.load_gtfs`.
+# The first puts scripts/ on sys.path rather than the repo root, so `transit`
+# would not be importable without this.
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
 import csv
 import io
@@ -19,11 +26,12 @@ import sys
 import zipfile
 
 import requests
+from transit import paths
 
 CKAN = "https://ckan0.cf.opendata.inter.prod-toronto.ca/api/3/action/package_show"
 DATASET = "ttc-routes-and-schedules"
-DB_PATH = "transit.db"
-ZIP_PATH = os.path.join("data", "ttc_gtfs.zip")
+DB_PATH = paths.TRANSIT_DB
+ZIP_PATH = paths.GTFS_ZIP
 
 # The files we care about. GTFS has more, but these five answer almost
 # every scheduling question you'd want to ask.

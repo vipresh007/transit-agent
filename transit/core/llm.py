@@ -29,9 +29,9 @@ from openai import (
     RateLimitError,
 )
 
-import cache
-import providers
-from tools import TOOL_SCHEMAS
+from transit.core import cache
+from transit.core import providers
+from transit.tools import TOOL_SCHEMAS
 
 RETRIABLE = (InternalServerError, RateLimitError, APIConnectionError, APITimeoutError)
 

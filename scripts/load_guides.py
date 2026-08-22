@@ -1,6 +1,6 @@
 """Stage 5: build a searchable index of Wikivoyage's Toronto guides.
 
-    python load_guides.py
+    python scripts/load_guides.py
 
 Downloads the Toronto article and its district subpages, splits them on
 section boundaries, embeds each chunk, and stores everything in guides.db.
@@ -19,6 +19,13 @@ keeps its article + heading as a prefix so a retrieved chunk carries the
 context needed to interpret it.
 """
 
+# Run either way: `python scripts/load_guides.py` or `python -m scripts.load_gtfs`.
+# The first puts scripts/ on sys.path rather than the repo root, so `transit`
+# would not be importable without this.
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+
 import json
 import os
 import re
@@ -29,11 +36,12 @@ import time
 
 import requests
 
-import embeddings
+from transit.core import embeddings
+from transit import paths
 
 API = "https://en.wikivoyage.org/w/api.php"
-DB_PATH = "guides.db"
-RAW_CACHE = "guides_raw.json"
+DB_PATH = paths.GUIDES_DB
+RAW_CACHE = paths.GUIDES_RAW
 ROOT_ARTICLE = os.getenv("GUIDE_ROOT", "Toronto")
 
 # Wikimedia's user-agent policy asks for a descriptive agent with a contact
