@@ -46,7 +46,8 @@ Layers, not alternatives — each calls the one below. Pick one per question.
 | `python plan.py "..."` | one A-to-B journey | typed itinerary, constraint checks, repair, memory |
 | `python crew.py "..."` | several *independent* questions | parallel subagents + synthesis |
 | `python graph.py "..."` | same as crew, via LangGraph | checkpointing, approval pauses |
-| `streamlit run ui.py` | you want to watch it work | live tool calls, itinerary table, badges |
+| `python serve.py` | the web app | live tool calls, timeline, journey map, free replay |
+| `streamlit run ui.py` | the older front end | same data, Streamlit's chrome |
 
 `crew.py` and `graph.py` call `agent.run()` directly, so they skip the typing
 and schedule verification `plan.py` adds — their answers are grounded but not
@@ -54,6 +55,16 @@ checked against the timetable.
 
 `python scripts/timing.py` breaks the last run down by where the wall clock
 went; `--compare before.json after.json` makes an optimisation falsifiable.
+
+Both front ends replay any saved trace — timeline, map, badges — with **zero
+model requests**. On a 20-a-day quota, looking at the UI again shouldn't cost a
+sixteenth of your budget.
+
+**Why two front ends exist.** Streamlit owns its page: the header, hamburger
+and Deploy button are the framework, and hiding them with CSS is fighting the
+tool. `serve.py` is FastAPI plus hand-written HTML — full control, no chrome.
+Both call `plan.plan()` and render `view.result_to_dict()`, so neither can
+disagree with the other about whether an itinerary is trustworthy.
 
 Everything else in `scripts/` runs once at setup. `tests/run_all.py` runs after code
 changes. `python -m transit.pipeline.evals` spends quota; run it on purpose.
@@ -68,7 +79,10 @@ transit/
   tools/        geo, transit, journey, guides, memory, registry
   verify/       constraints, grounding, schemas
   pipeline/     plan, crew, graph, evals
-ui.py           Streamlit front end (optional)
+serve.py        the web app  ->  http://127.0.0.1:8000
+ui.py           the earlier Streamlit front end (optional)
+transit/web/    FastAPI: 5 endpoints, SSE for live tool calls
+assets/web/     index.html, app.css, app.js — hand-written, no build step
 scripts/        load_gtfs, load_guides, optimize_db, list_models, timing
 data/           databases and downloads (gitignored)
 tests/

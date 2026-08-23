@@ -29,15 +29,15 @@ from contextlib import redirect_stderr
 
 import streamlit as st
 
-st.set_page_config(page_title="Toronto transit agent", page_icon="🚋",
-                   layout="centered")
+st.set_page_config(page_title="Toronto Transit Agent", page_icon="🚋",
+                   layout="wide", initial_sidebar_state="expanded")
 
 # PAINT BEFORE IMPORTING. The project imports below pull in the whole agent —
 # providers, tool registry, SQLite. If any of that raises or hangs, and it
 # happens before the first st.* call, the browser gets a blank page and the
 # terminal gets nothing: the server is fine, the script just never finished.
 # A blank page is the least debuggable failure there is, so make it impossible.
-st.title("🚋 Toronto transit agent")
+st.markdown("# 🚋 Toronto Transit Agent")
 _loading = st.empty()
 _loading.caption("loading the agent…")
 
@@ -70,6 +70,24 @@ except BaseException as exc:                                # noqa: BLE001
     st.stop()
 
 _loading.empty()
+
+# Styling lives in assets/style.css, not in this file: presentation changes
+# far more often than behaviour, and it shouldn't need a Python edit.
+_css = paths.ROOT / "assets" / "style.css"
+if _css.exists():
+    st.markdown(f"<style>{_css.read_text(encoding='utf-8')}</style>",
+                unsafe_allow_html=True)
+
+_have = ("transit.db" if paths.TRANSIT_DB.exists() else "no transit.db",
+         "guides.db" if paths.GUIDES_DB.exists() else "no guides.db")
+st.markdown(
+    view.hero_html(
+        "Plans real journeys on the live TTC feed — every departure checked "
+        "against the timetable before you see it.",
+        ["4.2M stop times", "hybrid RAG", "constraint-verified", *_have],
+    ),
+    unsafe_allow_html=True,
+)
 
 # Tools whose progress is worth narrating. The rest are fast enough that a
 # spinner for them is noise.
@@ -148,25 +166,98 @@ def run_plan(question: str, out: queue.Queue) -> None:
 # Rendering
 # ---------------------------------------------------------------------------
 
+def render_result(result, footnote: str = "") -> None:
+    """Everything about one answer, laid out. Used by BOTH tabs.
+
+    They had begun to diverge after two edits — the live tab gained the map
+    while replay didn't. One function, two callers: the same rule that put
+    plan() and _plan() apart.
+    """
+    if result.error:
+        st.error(result.error)
+        with st.expander("Research notes (the itinerary failed to parse)"):
+            st.write(result.research)
+        return
+
+    render_badges(result)
+
+    if result.itinerary.feasible:
+        left, right = st.columns([5, 6], gap="medium")
+        with left:
+            render_itinerary(result.itinerary)
+        with right:
+            render_map(result.itinerary,
+                       st.session_state.get("geocode_places", False))
+    else:
+        render_itinerary(result.itinerary)
+
+    if result.itinerary.caveats:
+        with st.expander(f"{len(result.itinerary.caveats)} caveat(s)"):
+            for caveat in result.itinerary.caveats:
+                st.markdown(f'<div class="caveat">• {caveat}</div>',
+                            unsafe_allow_html=True)
+    if footnote:
+        st.caption(footnote)
+
+
+def render_map(itinerary, allow_network: bool) -> None:
+    """The journey on a map. Draws what it can resolve and says what it can't."""
+    import pydeck
+
+    layers = view.map_layers(itinerary, allow_network=allow_network)
+    camera = view.viewport(layers["points"])
+    if not camera:
+        st.info("No stop coordinates could be resolved for this journey.")
+        return
+
+    st.pydeck_chart(pydeck.Deck(
+        map_style=None,
+        initial_view_state=pydeck.ViewState(**camera, pitch=0),
+        tooltip={"text": "{name}"},
+        layers=[
+            pydeck.Layer(
+                "PathLayer", data=layers["paths"], get_path="path",
+                get_color="colour", width_min_pixels=4, pickable=True,
+                get_width=5,
+            ),
+            pydeck.Layer(
+                "ScatterplotLayer", data=layers["points"],
+                get_position=["lon", "lat"], get_radius=45,
+                get_fill_color=[255, 255, 255], get_line_color=[40, 40, 40],
+                line_width_min_pixels=2, stroked=True, pickable=True,
+            ),
+        ],
+    ))
+
+    legend = " · ".join(
+        f"{p['label']}" for p in layers["paths"] if p["mode"] != "walk")
+    if legend:
+        st.caption(legend)
+
+    if layers["unresolved"]:
+        # Named rather than silently dropped: a map missing its start looks
+        # like a bug unless it says why. Neighbourhood names aren't in GTFS —
+        # stop names are intersections.
+        st.caption(
+            f"Not on the map (no coordinates in the feed): "
+            f"{', '.join(layers['unresolved'])}. "
+            f"Tick 'look up place names' to geocode them.")
+
+
 def render_itinerary(itinerary) -> None:
     if not itinerary.feasible:
         st.error(f"**No route found.** {itinerary.infeasible_reason}")
         return
 
-    st.dataframe(view.leg_rows(itinerary), hide_index=True,
-                 use_container_width=True)
-    st.caption(f"{itinerary.total_min} min total, "
-               f"{itinerary.transfers} transfer(s)")
-
-    for index, gap in itinerary.risky_connections():
-        st.warning(f"Tight transfer after leg {index + 1}: {gap} min to make "
-                   f"the {itinerary.legs[index + 1].route}")
+    st.markdown(f"#### {itinerary.total_min} min · "
+                f"{itinerary.transfers} transfer(s)")
+    # Tight-transfer warnings are inline in the timeline, next to the leg they
+    # concern, rather than stacked in a block above it.
+    st.markdown(view.timeline_html(itinerary), unsafe_allow_html=True)
 
 
 def render_badges(result) -> None:
-    for column, (label, value) in zip(st.columns(3),
-                                      view.badge_values(result).items()):
-        column.metric(label, value)
+    st.markdown(view.stats_html(result), unsafe_allow_html=True)
 
     if result.flags:
         st.warning(" · ".join(result.flags))
@@ -215,15 +306,47 @@ with st.sidebar:
         st.caption("_nothing remembered yet_")
 
     st.divider()
+    st.checkbox(
+        "Look up place names", key="geocode_places",
+        help="Neighbourhood names like 'Kensington Market' aren't in the "
+             "GTFS feed — stop names are intersections. Tick this to geocode "
+             "them for the map. One network call each, to a volunteer-run "
+             "service, so it's off by default.")
     st.caption(f"transit.db {'found' if paths.TRANSIT_DB.exists() else 'MISSING'}"
                f" · guides.db {'found' if paths.GUIDES_DB.exists() else 'MISSING'}")
 
-question = st.text_input(
-    "Where are you going?",
-    placeholder="how do I get from Kensington Market to the Distillery District?",
-)
+# Replaying a saved run costs nothing and renders instantly. With a 20/day
+# quota, "look at the UI again" should not cost a sixteenth of your budget.
+from transit.pipeline.plan import replay, replayable      # noqa: E402
 
-if st.button("Plan it", type="primary", disabled=not question):
+saved = replayable()
+live, recorded = st.tabs(["Ask the agent", f"Replay a saved run ({len(saved)})"])
+
+with recorded:
+    if not saved:
+        st.caption("No saved runs yet. Ask something first.")
+    else:
+        choice = st.selectbox(
+            "Which run?", saved,
+            format_func=lambda p: p.stem,
+            help="Rendered from the trace file — zero requests, no API key.")
+        if st.button("Show it", key="replay-go"):
+            try:
+                past = replay(choice)
+            except Exception as exc:                        # noqa: BLE001
+                st.error(f"{choice.name} can't be replayed: {exc}")
+            else:
+                st.markdown(f"##### {past.question}")
+                render_result(past, f"replayed from {choice.name} — 0 requests")
+
+with live:
+    question = st.text_input(
+        "Where are you going?",
+        placeholder="how do I get from Kensington Market to the Distillery District?",
+    )
+    go = st.button("Plan it", type="primary", disabled=not question)
+
+if go:
     events: queue.Queue = queue.Queue()
     worker = threading.Thread(target=run_plan, args=(question, events),
                               daemon=True)
@@ -283,16 +406,4 @@ if st.button("Plan it", type="primary", disabled=not question):
     elif result.get("kind") == "error":
         st.error(result["error"])
     else:
-        plan_result = result["result"]
-        if plan_result.error:
-            st.error(plan_result.error)
-            with st.expander("Research notes (the itinerary failed to parse)"):
-                st.write(plan_result.research)
-        else:
-            render_itinerary(plan_result.itinerary)
-            render_badges(plan_result)
-            if plan_result.itinerary.caveats:
-                with st.expander("Caveats"):
-                    for caveat in plan_result.itinerary.caveats:
-                        st.write(f"- {caveat}")
-        st.caption(llm.usage_line())
+        render_result(result["result"], llm.usage_line())

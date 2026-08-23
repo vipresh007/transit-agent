@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Toronto Transit Agent</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+
+<!-- Leaflet: no API key, no account, dark tiles from CARTO. -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<div class="aurora"><span></span><span></span><span></span></div>
+
+<header class="top">
+  <div class="brand">
+    <div class="mark">TTC</div>
+    <div>
+      <h1>Transit Agent</h1>
+      <p>Toronto · live GTFS feed</p>
+    </div>
+  </div>
+  <div class="health" id="health"></div>
+</header>
+
+<main>
+  <section class="hero">
+    <h2>Ask for a journey.<br><em>Every departure is checked against the timetable.</em></h2>
+    <p class="lede">
+      An agent that reads 4.2 million stop times, verifies each leg against the
+      real schedule, and tells you when it can't — rather than inventing a
+      plausible one.
+    </p>
+
+    <form id="ask" autocomplete="off">
+      <div class="field">
+        <svg viewBox="0 0 24 24" class="icon"><path d="M21 21l-4.35-4.35M11 19a8 8 0 110-16 8 8 0 010 16z"/></svg>
+        <input id="q" placeholder="How do I get from Kensington Market to the Distillery District?" />
+        <button id="go" type="submit"><span>Plan</span></button>
+      </div>
+    </form>
+
+    <div class="suggest" id="suggest">
+      <button data-q="How do I get from Kensington Market to the Distillery District?">Kensington → Distillery</button>
+      <button data-q="What's the last eastbound 501 Queen streetcar on a weekday?">Last 501 Queen</button>
+      <button data-q="How do I get from Union Station to Casa Loma?">Union → Casa Loma</button>
+      <button data-q="How do I get from Kensington Market to Scarborough Town Centre?">Scarborough, no bus</button>
+    </div>
+  </section>
+
+  <section class="console" id="console" hidden>
+    <div class="console-head">
+      <span class="dot-pulse"></span>
+      <strong id="console-title">Researching</strong>
+      <span class="elapsed" id="elapsed">0.0s</span>
+    </div>
+    <ol class="steps" id="steps"></ol>
+  </section>
+
+  <section class="result" id="result" hidden></section>
+
+  <section class="archive">
+    <div class="archive-head">
+      <h3>Saved runs</h3>
+      <span class="hint">Replay costs nothing — no model requests</span>
+    </div>
+    <div class="cards" id="traces"></div>
+  </section>
+</main>
+
+<footer>
+  <span>Free tiers throughout · GTFS · Wikivoyage · Nominatim · Open-Meteo</span>
+  <span id="usage"></span>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

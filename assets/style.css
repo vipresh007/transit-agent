@@ -1,0 +1,122 @@
+/* Presentation only. Kept out of ui.py so the Python stays about behaviour
+   and this stays editable without touching code. */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+:root {
+  --ink:       #e6edf3;
+  --muted:     #8b949e;
+  --line:      #232b36;
+  --panel:     rgba(22, 27, 34, 0.72);
+  --subway:    #007ac8;
+  --streetcar: #e8483f;
+  --bus:       #6e6e78;
+  --walk:      #8b949e;
+  --good:      #3fb950;
+  --warn:      #d29922;
+  --bad:       #f85149;
+}
+
+html, body, [class*="css"] { font-family: 'Inter', system-ui, sans-serif; }
+
+/* Streamlit chrome we didn't ask for */
+#MainMenu, footer, header [data-testid="stToolbar"] { visibility: hidden; }
+.block-container { padding-top: 2.2rem; max-width: 1080px; }
+
+/* ---- hero ---------------------------------------------------------- */
+.hero {
+  position: relative; overflow: hidden;
+  border-radius: 20px; padding: 30px 34px 26px;
+  margin-bottom: 22px;
+  background:
+    radial-gradient(1200px 220px at 12% -30%, rgba(232,72,63,.30), transparent 60%),
+    radial-gradient(900px 220px at 88% -20%, rgba(0,122,200,.28), transparent 60%),
+    linear-gradient(160deg, #151b24 0%, #0f141b 100%);
+  border: 1px solid var(--line);
+}
+.hero h1 {
+  margin: 0; font-size: 2.05rem; font-weight: 800; letter-spacing: -.03em;
+  background: linear-gradient(92deg, #fff 10%, #b9c6d4 90%);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+}
+.hero p { margin: 8px 0 0; color: var(--muted); font-size: .95rem; }
+.hero .chips { margin-top: 16px; display: flex; gap: 8px; flex-wrap: wrap; }
+.chip {
+  font-size: .72rem; font-weight: 600; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 999px;
+  padding: 5px 11px; background: rgba(255,255,255,.02);
+}
+
+/* ---- stat cards ----------------------------------------------------- */
+.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 18px 0 6px; }
+.stat {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 14px; padding: 15px 17px;
+  backdrop-filter: blur(8px);
+}
+.stat .k {
+  font-size: .68rem; text-transform: uppercase; letter-spacing: .09em;
+  color: var(--muted); font-weight: 600;
+}
+.stat .v { font-size: 1.32rem; font-weight: 700; margin-top: 5px; letter-spacing: -.02em; }
+.stat.ok  .v { color: var(--good); }
+.stat.warn .v { color: var(--warn); }
+.stat.bad  .v { color: var(--bad); }
+
+/* ---- timeline ------------------------------------------------------- */
+.tl { position: relative; margin: 22px 0 6px; padding-left: 30px; }
+.tl::before {
+  content: ''; position: absolute; left: 9px; top: 10px; bottom: 10px; width: 2px;
+  background: linear-gradient(180deg, var(--streetcar), var(--subway), transparent);
+  opacity: .5;
+}
+.leg { position: relative; margin-bottom: 12px; }
+.leg::before {
+  content: ''; position: absolute; left: -26px; top: 20px;
+  width: 11px; height: 11px; border-radius: 50%;
+  background: var(--dot, var(--muted));
+  box-shadow: 0 0 0 3px #0d1117, 0 0 12px var(--dot, transparent);
+}
+.leg .card {
+  background: var(--panel); border: 1px solid var(--line);
+  border-left: 3px solid var(--dot, var(--line));
+  border-radius: 12px; padding: 13px 16px;
+  display: flex; align-items: center; gap: 15px;
+  transition: transform .14s ease, border-color .14s ease;
+}
+.leg .card:hover { transform: translateX(3px); border-color: #33404f; }
+.leg .time {
+  font-variant-numeric: tabular-nums; font-weight: 700;
+  font-size: .95rem; min-width: 82px; letter-spacing: -.01em;
+}
+.leg .body { flex: 1; min-width: 0; }
+.leg .route {
+  display: inline-block; font-weight: 800; font-size: .76rem;
+  padding: 3px 9px; border-radius: 7px; color: #fff;
+  background: var(--dot, var(--bus)); letter-spacing: .03em;
+}
+.leg .where {
+  color: var(--muted); font-size: .84rem; margin-top: 5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.leg .dur { color: var(--muted); font-size: .8rem; font-variant-numeric: tabular-nums; }
+.leg.walking .card { border-style: dashed; background: rgba(22,27,34,.4); }
+
+.leg .gap {
+  margin: 7px 0 7px 0; font-size: .75rem; color: var(--warn);
+  display: flex; align-items: center; gap: 6px;
+}
+
+/* ---- misc ----------------------------------------------------------- */
+.stTabs [data-baseweb="tab-list"] { gap: 4px; }
+.stTabs [data-baseweb="tab"] { border-radius: 9px 9px 0 0; padding: 9px 16px; }
+div[data-testid="stExpander"] details {
+  border: 1px solid var(--line); border-radius: 12px; background: rgba(22,27,34,.5);
+}
+.stButton > button {
+  border-radius: 10px; font-weight: 600; border: 1px solid var(--line);
+  transition: transform .12s ease;
+}
+.stButton > button:hover { transform: translateY(-1px); }
+.caveat { color: var(--muted); font-size: .85rem; }

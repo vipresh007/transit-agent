@@ -38,7 +38,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 PACKAGES = ("transit", "scripts", "tests")
-ENTRY_POINTS = ("agent.py", "plan.py", "crew.py", "graph.py")
+ENTRY_POINTS = ("agent.py", "plan.py", "crew.py", "graph.py", "serve.py")
 
 
 def sources() -> list[Path]:

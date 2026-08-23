@@ -14,6 +14,7 @@ depends on and could silently break:
     pipeline rather than two that drift
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -257,6 +258,198 @@ def test_concurrency_is_declared_not_guessed():
     llm.reset_run()
 
 
+class _Leg:
+    def __init__(self, mode, route, origin, destination, minutes=5,
+                 depart="08:00:00", arrive="08:05:00"):
+        self.mode, self.route = mode, route
+        self.origin, self.destination = origin, destination
+        self.duration_min = minutes
+        self.depart, self.arrive = depart, arrive
+
+
+class _Itin:
+    def __init__(self, legs):
+        self.legs = legs
+
+
+def test_map_geometry():
+    section("the journey as map geometry")
+
+    from pathlib import Path as _P
+
+    from transit import paths as _paths
+    from transit.pipeline import view
+
+    if not _paths.TRANSIT_DB.exists():
+        print("  (skipped: transit.db not built)")
+        return
+
+    # Real stops resolve from the feed; neighbourhood names do not, because
+    # GTFS stop names are intersections. Both cases must be handled, and the
+    # unresolved ones must be REPORTED rather than silently dropped — a map
+    # missing its start looks like a bug unless it says why.
+    itinerary = _Itin([
+        _Leg("walk", None, "Kensington Market",
+             "Spadina Ave at Nassau St South Side (8128)", 3),
+        _Leg("streetcar", "510", "Spadina Ave at Nassau St South Side",
+             "Spadina Ave at King St West", 8),
+        _Leg("streetcar", "504", "King St West at Spadina Ave East Side",
+             "Distillery Loop", 21),
+    ])
+    layers = view.map_layers(itinerary)
+
+    check("resolved stops become points", len(layers["points"]) >= 3)
+    check("every point has coordinates",
+          all("lat" in p and "lon" in p for p in layers["points"]))
+    check("the id suffix doesn't create a duplicate point",
+          len({p["name"] for p in layers["points"]}), len(layers["points"]))
+    check("legs with both ends known become paths", len(layers["paths"]), 2)
+    check("a walk is dashed",
+          [p["dashed"] for p in layers["paths"]], [False, False])
+    check("streetcar legs are red",
+          layers["paths"][0]["colour"], list(view.MODE_COLOUR["streetcar"]))
+    check("neighbourhood names are named, not dropped",
+          layers["unresolved"], ["Kensington Market"])
+
+    camera = view.viewport(layers["points"])
+    check("the viewport centres on Toronto",
+          43.4 < camera["latitude"] < 44.0 and -79.8 < camera["longitude"] < -79.0)
+    check("and zooms in rather than out", 10.0 <= camera["zoom"] <= 15.0)
+    check("no points means no camera", view.viewport([]), None)
+
+    # A coordinate outside Toronto is a mis-geocode, and one bad point
+    # stretches the viewport across an ocean. Refusing it beats plotting it.
+    check("a point in another country is rejected", view._in_toronto(34.7, 135.5), False)
+    check("a Toronto point is accepted", view._in_toronto(43.65, -79.38))
+
+
+def test_timeline_markup():
+    section("the timeline, as markup a test can read")
+
+    from transit.pipeline import view
+
+    class _T(_Itin):
+        feasible = True
+        def risky_connections(self):
+            return [(1, 3)]
+
+    itinerary = _T([
+        _Leg("walk", None, "Kensington Market", "Spadina at Nassau", 3),
+        _Leg("streetcar", "510", "Spadina at Nassau", "Spadina at King", 8),
+        _Leg("streetcar", "504", "King at Spadina", "Distillery Loop", 21),
+    ])
+    html = view.timeline_html(itinerary)
+
+    check("one card per leg, plus arrival", html.count('class="leg'), 4)
+    check("walks are marked", html.count("leg walking"), 1)
+    check("the tight transfer is inline, not in a block above",
+          html.count('class="gap"'), 1)
+    check("and names the route you'd miss", "504" in html)
+    check("the journey ends with an arrival card", "ARRIVE" in html)
+    check("streetcars are red", view.HEX["streetcar"] in html)
+    check("walks are grey", view.HEX["walk"] in html)
+
+    # unsafe_allow_html means what it says, and stop names come from a public
+    # feed while answers come from a model. Neither is trusted markup.
+    nasty = _T([_Leg("walk", None, "<script>alert(1)</script>", "B", 2)])
+    escaped = view.timeline_html(nasty)
+    check("markup in a stop name is escaped", "<script>" not in escaped)
+    check("and survives as text", "&lt;script&gt;" in escaped)
+
+
+def test_stat_cards_show_severity():
+    section("stat cards")
+
+    from transit.pipeline import view
+
+    clean = _FakeResult(grounding={"coverage": 1.0})
+    html = view.stats_html(clean)
+    check("a clean result is green", 'class="stat ok"' in html)
+
+    # The threshold matches agent.MIN_GROUNDING: below it the loop itself
+    # pushes back, so the badge must not look content when the run wasn't.
+    check("0.9 grounding reads ok", view._grounding_tone(0.9), "ok")
+    check("0.7 grounding is a warning", view._grounding_tone(0.7), "warn")
+    check("0.3 grounding is bad", view._grounding_tone(0.3), "bad")
+    check("missing grounding has no tone", view._grounding_tone(None), "")
+
+    broken = _FakeResult(violations=[1, 2], no_schedule_data=True, grounding={})
+    html = view.stats_html(broken)
+    check("violations turn the card red", 'class="stat bad"' in html)
+    check("and the count is shown", "2 problem(s)" in html)
+
+
+def test_json_for_the_browser():
+    section("what the web front end receives")
+
+    from transit.pipeline import view
+
+    class _T(_Itin):
+        summary = "Take the 510 then the 504."
+        feasible = True
+        infeasible_reason = None
+        caveats = ["Real-time delays not checked."]
+        total_min = 43
+        transfers = 1
+        def risky_connections(self):
+            return [(0, 3)]
+
+    result = _FakeResult(
+        question="how do I get there?", error=None, steps=5,
+        itinerary=_T([
+            _Leg("streetcar", "510", "Spadina at Nassau", "Spadina at King", 8,
+                 "08:03:00", "08:11:00"),
+            _Leg("streetcar", "504", "King at Spadina", "Distillery Loop", 21,
+                 "08:15:00", "08:36:00"),
+        ]),
+        grounding={"coverage": 1.0, "claims": 12, "unsupported": []},
+        flags=[])
+
+    payload = view.result_to_dict(result)
+
+    check("legs are serialised", len(payload["legs"]), 2)
+    check("times are human-readable, not GTFS",
+          payload["legs"][0]["depart"], "8:03 AM")
+    check("each leg carries its own colour",
+          payload["legs"][0]["colour"], view.HEX["streetcar"])
+
+    # The warning rides ON the leg it concerns. Sending a separate list would
+    # make the browser re-associate them by index, which is a chance to get
+    # it wrong for no benefit.
+    check("a tight transfer is attached to its leg",
+          payload["legs"][0]["warning"] is not None)
+    check("and the next leg is clean", payload["legs"][1]["warning"], None)
+
+    # Every judgement is made in Python. If the browser decided what counted
+    # as verified, the CLI and the web app could disagree about whether the
+    # same itinerary was trustworthy — the worst possible disagreement.
+    check("tone is decided server-side", payload["tone"]["Schedule"], "ok")
+    check("stats are decided server-side",
+          payload["stats"]["Times"], "from the feed")
+    check("caveats come through", len(payload["caveats"]), 1)
+    check("the JSON survives a round trip",
+          json.loads(json.dumps(payload, default=str))["legs"][0]["route"], "510")
+
+    # An infeasible answer must serialise too — that's a real outcome, not an
+    # error, and the browser needs enough to say so.
+    class _No(_Itin):
+        summary = "No route without buses."
+        feasible = False
+        infeasible_reason = "Scarborough Town Centre is bus-only."
+        caveats = []
+        total_min = 0
+        transfers = 0
+        def risky_connections(self):
+            return []
+
+    blocked = view.result_to_dict(_FakeResult(
+        question="q", error=None, steps=3, itinerary=_No([]),
+        grounding={}, flags=["NO ROUTE"]))
+    check("an infeasible result still serialises", blocked["feasible"], False)
+    check("with the reason", "bus-only" in blocked["infeasible_reason"])
+    check("and no map to draw", blocked["map"]["points"], [])
+
+
 def test_the_cli_delegates_to_the_pipeline():
     """Static: does _plan() call plan(), or has it grown its own copy again?
 
@@ -293,7 +486,11 @@ if __name__ == "__main__":
                test_view_helpers_match_the_apis_they_call,
                test_badges_are_decided_once,
                test_counters_reset_between_runs,
-               test_concurrency_is_declared_not_guessed):
+               test_concurrency_is_declared_not_guessed,
+               test_map_geometry,
+               test_timeline_markup,
+               test_stat_cards_show_severity,
+               test_json_for_the_browser):
         fn()
     from _harness import PASSED
     print(f"\n{PASSED['n']} checks passed")

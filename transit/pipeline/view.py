@@ -14,7 +14,13 @@ possible.
 
 from __future__ import annotations
 
-from transit.tools import memory
+import json
+import math
+import sqlite3
+
+from transit import paths
+from transit.tools import geo, memory
+from transit.verify import constraints
 from transit.verify.gtfstime import to_civil
 
 
@@ -58,3 +64,325 @@ def badge_values(result) -> dict[str, str]:
         "Times": "ESTIMATED" if result.no_schedule_data else "from the feed",
         "Grounding": f"{coverage:.0%}" if coverage is not None else "—",
     }
+
+
+# ---------------------------------------------------------------------------
+# Map geometry
+# ---------------------------------------------------------------------------
+
+# Toronto-ish. Used only to reject a geocode that wandered to another
+# continent — "Distillery District" alone matches places in several countries,
+# and a single bad point stretches the map viewport across an ocean.
+TORONTO_BOX = (43.4, 44.0, -79.8, -79.0)          # lat_min, lat_max, lon_min, lon_max
+
+MODE_COLOUR = {
+    "subway": (0, 122, 200),
+    "streetcar": (208, 45, 45),
+    "bus": (110, 110, 120),
+    "walk": (140, 140, 150),
+}
+
+_point_cache: dict[str, tuple[float, float] | None] = {}
+
+
+def _in_toronto(lat: float, lon: float) -> bool:
+    lat_min, lat_max, lon_min, lon_max = TORONTO_BOX
+    return lat_min <= lat <= lat_max and lon_min <= lon <= lon_max
+
+
+def locate(label: str, allow_network: bool = False) -> tuple[float, float] | None:
+    """Coordinates for a leg endpoint, or None if we genuinely don't know.
+
+    Two kinds of label arrive here and they resolve differently:
+
+      "Spadina Ave at Nassau St South Side (8128)"   a real GTFS stop
+      "Kensington Market"                            a neighbourhood, which
+                                                     appears nowhere in the
+                                                     feed — stop names are
+                                                     intersections
+
+    The database is tried first because it's instant, offline and exact.
+    Geocoding is opt-in: it's a network call to a volunteer-run service, and
+    a map is not worth hammering Nominatim for.
+
+    Returns None rather than a guess. A fabricated coordinate would draw a
+    confident line to the wrong place, which is worse than a gap — the same
+    reason the itinerary reports "no route" instead of inventing one.
+    """
+    label = (label or "").strip()
+    if not label:
+        return None
+    if label in _point_cache:
+        return _point_cache[label]
+
+    found = None
+    if paths.TRANSIT_DB.exists():
+        conn = sqlite3.connect(paths.readonly_uri(paths.TRANSIT_DB), uri=True)
+        try:
+            found = constraints._stop_coords(conn, label)
+        finally:
+            conn.close()
+
+    if found is None and allow_network:
+        try:
+            payload = json.loads(geo.geocode(f"{label}, Toronto"))
+            found = (float(payload["lat"]), float(payload["lon"]))
+        except Exception:                                   # noqa: BLE001
+            found = None
+
+    if found and not _in_toronto(*found):
+        # A place name that matched somewhere else entirely. One such point
+        # zooms the map out to fit two continents.
+        found = None
+
+    _point_cache[label] = found
+    return found
+
+
+def map_layers(itinerary, allow_network: bool = False) -> dict:
+    """Points and paths for the journey, ready to hand to a map widget.
+
+    Kept here rather than in ui.py so it can be tested: the interesting part
+    is which endpoints resolve and which don't, and that needs no browser.
+    """
+    points: list[dict] = []
+    paths_out: list[dict] = []
+    unresolved: list[str] = []
+    # Keyed by POSITION, not by label. The same stop arrives written both ways
+    # — "Spadina Ave at Nassau St South Side" from one leg and the same name
+    # with "(8128)" appended from the next — and de-duplicating on the string
+    # drew two identical pins on top of each other. The thing that must be
+    # unique is the place, not how it happened to be spelled.
+    seen: set[tuple] = set()
+
+    for index, leg in enumerate(itinerary.legs):
+        start = locate(leg.origin, allow_network)
+        end = locate(leg.destination, allow_network)
+
+        for label, point in ((leg.origin, start), (leg.destination, end)):
+            if point is None:
+                if label not in unresolved:
+                    unresolved.append(label)
+                continue
+            key = (round(point[0], 5), round(point[1], 5))
+            if key in seen:
+                continue
+            seen.add(key)
+            points.append({
+                "name": constraints.split_stop_label(label)[0],
+                "lat": point[0],
+                "lon": point[1],
+            })
+
+        if start and end:
+            paths_out.append({
+                "path": [[start[1], start[0]], [end[1], end[0]]],
+                "colour": list(MODE_COLOUR.get(leg.mode, MODE_COLOUR["bus"])),
+                "mode": leg.mode,
+                "label": (f"walk {leg.duration_min} min" if leg.mode == "walk"
+                          else f"{leg.route} · {leg.duration_min} min"),
+                "dashed": leg.mode == "walk",
+                "leg": index + 1,
+            })
+
+    return {"points": points, "paths": paths_out, "unresolved": unresolved}
+
+
+def viewport(points: list[dict]) -> dict | None:
+    """Centre and zoom that fit every point, with a little air."""
+    if not points:
+        return None
+    lats = [p["lat"] for p in points]
+    lons = [p["lon"] for p in points]
+    span = max(max(lats) - min(lats), (max(lons) - min(lons)) * 0.72, 0.005)
+    # Rough but stable: each halving of the span buys one zoom level.
+    zoom = max(10.0, min(15.0, 13.5 - math.log2(span / 0.02) * 0.9))
+    return {
+        "latitude": (max(lats) + min(lats)) / 2,
+        "longitude": (max(lons) + min(lons)) / 2,
+        "zoom": round(zoom, 1),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Markup
+#
+# HTML in a "view" module looks odd until you remember why view.py exists:
+# ui.py can't be imported, so nothing in it can be tested. Building the markup
+# here means the timeline's structure — which legs get a warning, what a walk
+# looks like, whether a route badge appears — is covered by the suite rather
+# than only by looking at it.
+# ---------------------------------------------------------------------------
+
+HEX = {
+    "subway": "#007ac8",
+    "streetcar": "#e8483f",
+    "bus": "#6e6e78",
+    "walk": "#8b949e",
+}
+
+
+def _escape(text) -> str:
+    """Stop a stop name from becoming markup.
+
+    Stop names come from a public feed and answers come from a model. Neither
+    is hostile here, but both are untrusted input to an HTML string, and
+    `unsafe_allow_html` means exactly what it says.
+    """
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def timeline_html(itinerary) -> str:
+    """The itinerary as a vertical timeline."""
+    risky = dict(itinerary.risky_connections())
+    out = ['<div class="tl">']
+
+    for index, leg in enumerate(itinerary.legs):
+        colour = HEX.get(leg.mode, HEX["bus"])
+        walking = leg.mode == "walk"
+        badge = ("WALK" if walking
+                 else f"{_escape(leg.route)} · {_escape(leg.mode)}")
+        out.append(
+            f'<div class="leg{" walking" if walking else ""}" '
+            f'style="--dot:{colour}">'
+            f'<div class="card">'
+            f'<div class="time">{_escape(to_civil(leg.depart))}</div>'
+            f'<div class="body">'
+            f'<span class="route">{badge}</span>'
+            f'<div class="where">{_escape(constraints.split_stop_label(leg.origin)[0])}'
+            f' → {_escape(constraints.split_stop_label(leg.destination)[0])}</div>'
+            f'</div>'
+            f'<div class="dur">{leg.duration_min} min</div>'
+            f'</div>'
+        )
+        if index in risky:
+            out.append(
+                f'<div class="gap">⚠ only {risky[index]} min to make the '
+                f'{_escape(itinerary.legs[index + 1].route)}</div>')
+        out.append("</div>")
+
+    last = itinerary.legs[-1] if itinerary.legs else None
+    if last:
+        out.append(
+            f'<div class="leg" style="--dot:#3fb950"><div class="card">'
+            f'<div class="time">{_escape(to_civil(last.arrive))}</div>'
+            f'<div class="body"><span class="route">ARRIVE</span>'
+            f'<div class="where">{_escape(constraints.split_stop_label(last.destination)[0])}'
+            f'</div></div></div></div>')
+
+    out.append("</div>")
+    return "".join(out)
+
+
+def stats_html(result) -> str:
+    """The three headline numbers as cards, colour-coded by what they mean."""
+    values = badge_values(result)
+    tone = {
+        "Schedule": "ok" if not result.violations else "bad",
+        "Times": "bad" if result.no_schedule_data else "ok",
+        "Grounding": _grounding_tone(result.grounding.get("coverage")),
+    }
+    cards = "".join(
+        f'<div class="stat {tone.get(k, "")}">'
+        f'<div class="k">{_escape(k)}</div>'
+        f'<div class="v">{_escape(v)}</div></div>'
+        for k, v in values.items()
+    )
+    return f'<div class="stats">{cards}</div>'
+
+
+def _grounding_tone(coverage) -> str:
+    if coverage is None:
+        return ""
+    # Matches agent.MIN_GROUNDING: below 0.85 the agent itself pushes back,
+    # so the badge shouldn't look content when the loop wasn't.
+    return "ok" if coverage >= 0.85 else ("warn" if coverage >= 0.6 else "bad")
+
+
+def hero_html(subtitle: str, chips: list[str]) -> str:
+    pills = "".join(f'<span class="chip">{_escape(c)}</span>' for c in chips)
+    return (
+        '<div class="hero">'
+        '<h1>Toronto Transit Agent</h1>'
+        f'<p>{_escape(subtitle)}</p>'
+        f'<div class="chips">{pills}</div>'
+        '</div>'
+    )
+
+
+# ---------------------------------------------------------------------------
+# JSON for the web front end
+# ---------------------------------------------------------------------------
+
+def result_to_dict(result, allow_network: bool = False) -> dict:
+    """A PlanResult as plain JSON for the browser.
+
+    The browser renders; Python decides. Every judgement that could differ
+    between front ends — is this verified, are the times real, what colour is
+    a 504 — is made once here. The CLI, the old Streamlit page and the web app
+    disagreeing about whether an itinerary is trustworthy would be far worse
+    than any of them looking plain.
+    """
+    itinerary = result.itinerary
+    payload = {
+        "question": result.question,
+        "error": result.error,
+        "flags": result.flags,
+        "stats": badge_values(result),
+        "tone": {
+            "Schedule": "ok" if not result.violations else "bad",
+            "Times": "bad" if result.no_schedule_data else "ok",
+            "Grounding": _grounding_tone(result.grounding.get("coverage")),
+        },
+        "violations": [
+            {"kind": v.kind, "detail": v.detail, "fix": v.fix}
+            for v in result.violations
+        ],
+        "grounding": {
+            "coverage": result.grounding.get("coverage"),
+            "claims": result.grounding.get("claims"),
+            "unsupported": result.grounding.get("unsupported", []),
+        },
+        "steps": result.steps,
+        "legs": [],
+        "caveats": [],
+        "map": {"points": [], "paths": [], "unresolved": []},
+        "viewport": None,
+        "feasible": False,
+        "summary": "",
+    }
+    if itinerary is None:
+        return payload
+
+    payload.update(
+        summary=itinerary.summary,
+        feasible=itinerary.feasible,
+        infeasible_reason=itinerary.infeasible_reason,
+        caveats=list(itinerary.caveats),
+        total_min=itinerary.total_min,
+        transfers=itinerary.transfers,
+    )
+
+    risky = dict(itinerary.risky_connections())
+    for index, leg in enumerate(itinerary.legs):
+        payload["legs"].append({
+            "mode": leg.mode,
+            "route": leg.route,
+            "colour": HEX.get(leg.mode, HEX["bus"]),
+            "depart": to_civil(leg.depart),
+            "arrive": to_civil(leg.arrive),
+            "origin": constraints.split_stop_label(leg.origin)[0],
+            "destination": constraints.split_stop_label(leg.destination)[0],
+            "minutes": leg.duration_min,
+            # Attached to the leg it concerns, not collected into a separate
+            # list the front end would have to re-associate.
+            "warning": (f"only {risky[index]} min to make the "
+                        f"{itinerary.legs[index + 1].route}")
+                       if index in risky else None,
+        })
+
+    if itinerary.feasible:
+        payload["map"] = map_layers(itinerary, allow_network=allow_network)
+        payload["viewport"] = viewport(payload["map"]["points"])
+    return payload

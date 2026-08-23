@@ -31,6 +31,7 @@ from pydantic import ValidationError
 # runtime. `from agent import provider` used to bind the old value forever and
 # this footer reported "gemini" after failing over to Groq. Functions can't go
 # stale, so that class of bug is now structurally impossible.
+from transit import paths
 from transit.core import agent
 from transit.verify import constraints
 from transit.verify import grounding
@@ -489,3 +490,60 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def replay(trace_path) -> PlanResult:
+    """Rebuild a PlanResult from a saved trace. Zero requests, no API key.
+
+    Iterating on the UI otherwise costs a full agent run per look — sixteen
+    requests against a twenty-a-day quota, to check a colour. This makes the
+    visuals free to work on, and doubles as a way to show the thing to someone
+    without spending anything.
+
+    It reads the trace's own record of what happened rather than re-deriving
+    anything, so a replay shows exactly what that run produced — including its
+    violations and its grounding score. A replay that recomputed would be a
+    different run wearing an old run's name.
+    """
+    import json
+    from pathlib import Path
+
+    data = json.loads(Path(trace_path).read_text(encoding="utf-8"))
+    if not data.get("itinerary"):
+        raise ValueError(
+            f"{Path(trace_path).name} has no itinerary — it's a crash trace, "
+            f"or came from agent.py/crew.py rather than plan.py.")
+
+    prefs = constraints.Preferences.from_env()
+    result = PlanResult(
+        question=data.get("question", ""),
+        research=data.get("research_notes", ""),
+        prefs=prefs,
+        remembered=(data.get("constraints") or {}).get("from_memory", []),
+        itinerary=Itinerary.model_validate(data["itinerary"]),
+        grounding=data.get("grounding") or {},
+        steps=(data.get("flags") or {}).get("steps", 0),
+        repeats=(data.get("flags") or {}).get("repeats", 0),
+        truncated=bool((data.get("flags") or {}).get("truncated")),
+        no_schedule_data=(data.get("flags") or {}).get("times_retrieved", 0) == 0,
+        trace_path=Path(trace_path),
+    )
+
+    # Violations were stringified into the trace, so they can't be rebuilt as
+    # Violation objects. Re-verifying against the CURRENT database is honest
+    # and usually identical — and when it differs, that difference is itself
+    # worth seeing: the feed changed under a saved answer.
+    if result.itinerary.feasible:
+        result.violations = constraints.verify(result.itinerary, prefs)
+    return result
+
+
+def replayable(trace_dir=None) -> list:
+    """Saved runs that carry an itinerary, newest first."""
+    from pathlib import Path
+
+    directory = Path(trace_dir) if trace_dir else paths.TRACES
+    if not directory.exists():
+        return []
+    found = [p for p in directory.glob("*.json") if p.name != "latest.json"]
+    return sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)
