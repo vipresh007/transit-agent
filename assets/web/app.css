@@ -331,3 +331,13 @@ footer {
   margin-top: 9px; font-family: 'JetBrains Mono', monospace;
   font-size: .73rem; color: var(--dim);
 }
+
+/* Basemap switch, sitting on the map itself. */
+.basemap-toggle {
+  background: rgba(11, 16, 24, .86); color: #eaf0f7;
+  border: 1px solid rgba(255,255,255,.18); border-radius: 8px;
+  padding: 6px 12px; font-family: 'Inter', sans-serif;
+  font-size: .74rem; font-weight: 600; cursor: pointer;
+  backdrop-filter: blur(8px); box-shadow: 0 4px 14px -4px #000;
+}
+.basemap-toggle:hover { background: rgba(11, 16, 24, .96); }

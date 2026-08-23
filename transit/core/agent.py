@@ -41,7 +41,8 @@ from transit.core import providers
 from transit.core import trace
 from transit.core.llm import DailyQuotaExhausted, call_model
 from transit.core.threadstate import ThreadLocalDict
-from transit.tools import SCHEDULE_TOOLS, TOOL_FUNCTIONS
+from transit.tools import (SCHEDULE_TOOLS, TOOL_FUNCTIONS, TOOL_SETS,
+                           schemas_for)
 
 MAX_STEPS = providers.MAX_STEPS
 
@@ -272,7 +273,21 @@ MIN_GROUNDING = float(os.getenv("MIN_GROUNDING", "0.85"))
 
 
 def run(user_message: str, verbose: bool = True, require_times: bool = False,
-        require_grounding: bool = False) -> str:
+        require_grounding: bool = False, tools: str | list | None = None) -> str:
+    """Run the loop.
+
+    `tools` narrows what's offered: a TOOL_SETS name like "journey", an
+    explicit list of tool names, or None for everything. Every schema is
+    resent on every call, so the full set costs ~1,910 tokens per request —
+    and a point-to-point question never touches the weather.
+
+    Narrowing is a real trade, not free: a tool the agent cannot call is a
+    move it cannot make. Default stays "all" so a caller that hasn't thought
+    about it gets exactly what it always got.
+    """
+    if isinstance(tools, str):
+        tools = TOOL_SETS[tools]
+    schemas = schemas_for(tools)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_message},
@@ -307,7 +322,7 @@ def run(user_message: str, verbose: bool = True, require_times: bool = False,
                 }
             )
 
-        response = call_model(messages, verbose=verbose)
+        response = call_model(messages, verbose=verbose, schemas=schemas)
         message = response.choices[0].message
 
         # No tool calls means the model thinks it's finished.

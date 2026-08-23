@@ -214,6 +214,10 @@ def repair(itinerary, violations, prefs, rounds: int = 2, verbose: bool = True,
             ),
             verbose=verbose,
             require_times=True,
+            # Same scope as the research pass. A repair round that quietly
+            # paid full price for tools it can't use would undo the saving
+            # exactly when the run is already in trouble.
+            tools="journey",
         )
         # run() resets trace.EVENTS, so harvest this round's tool results
         # before the next call wipes them. Without this the grounding check
@@ -314,10 +318,15 @@ def plan(question: str, prefs: constraints.Preferences | None = None,
     # State the constraints up front as well as checking them afterwards.
     # Verification alone would work, but every violation costs a repair round,
     # and a repair round costs a full agent run.
+    # "journey" drops search_guides, find_pois and get_weather — ~740 tokens
+    # off EVERY call, and plan.py has never wanted any of them. It's the
+    # difference between fitting inside Groq's 8,000-per-minute cap and being
+    # rejected outright.
     research = run(
         question + RESEARCH_SUFFIX
         + f"\n\nThe traveller's constraints: {prefs.describe()}.",
         require_times=True, require_grounding=True, verbose=verbose,
+        tools="journey",
     )
 
     result = PlanResult(

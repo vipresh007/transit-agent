@@ -210,14 +210,27 @@ def test_route_label_resolution():
 def test_stop_labels_carrying_their_id():
     section("stop labels as the tools hand them back")
 
+    # Every one of these came out of a real run. The model does not write a
+    # stop the same way twice, and a parser that knows one form silently fails
+    # on the others: two whole journeys resolved to ZERO map points, and the
+    # schedule verifier reported false violations on correct legs.
     for label, expected in [
         ("Spadina Ave at Nassau St South Side (8128)",
          ("Spadina Ave at Nassau St South Side", "8128")),
         ("King St West at Spadina Ave East Side (15648)",
          ("King St West at Spadina Ave East Side", "15648")),
+        ("Spadina Ave at Nassau St South Side (stop 8128)",
+         ("Spadina Ave at Nassau St South Side", "8128")),
+        ("Stop 8128 (Spadina Ave at Nassau St South Side)",
+         ("Spadina Ave at Nassau St South Side", "8128")),
+        ("Stop 1163 (King St at Spadina Ave, eastbound)",
+         ("King St at Spadina Ave, eastbound", "1163")),
+        ("Stop 8128 - Spadina Ave at Nassau St",
+         ("Spadina Ave at Nassau St", "8128")),
         ("Distillery Loop", ("Distillery Loop", None)),
-        # Not every parenthesis is an id.
+        # Not every parenthesis is an id, and not every leading word is "stop".
         ("Union Station (Bay St)", ("Union Station (Bay St)", None)),
+        ("Stopford Park", ("Stopford Park", None)),
         ("", ("", None)),
     ]:
         check(f"{label!r} splits correctly", C.split_stop_label(label), expected)
@@ -236,6 +249,9 @@ def test_stop_labels_carrying_their_id():
         for route, label, t in (
             ("510", "Spadina Ave at Nassau St South Side (8128)", "08:21:31"),
             ("504", "King St West at Spadina Ave East Side (15648)", "08:39:22"),
+            # The forms that were silently failing verification.
+            ("510", "Spadina Ave at Nassau St South Side (stop 8128)", "08:21:31"),
+            ("510", "Stop 8128 (Spadina Ave at Nassau St South Side)", "08:21:31"),
         ):
             check(f"{route} at {t} with an id-suffixed label verifies",
                   C._departure_is_scheduled(conn, route, label, t))

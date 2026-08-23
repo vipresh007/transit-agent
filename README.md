@@ -18,6 +18,7 @@ python scripts/load_gtfs.py          # TTC schedule -> data/transit.db  (~3 min)
 python scripts/optimize_db.py        # indexes the journey planner needs
 ollama pull nomic-embed-text         # local embedding model
 python scripts/load_guides.py        # Wikivoyage -> data/guides.db     (~6 min)
+python scripts/load_shapes.py        # optional: real track geometry for the map (~25s)
 python tests/run_all.py              # verify, free
 ```
 
@@ -83,7 +84,7 @@ serve.py        the web app  ->  http://127.0.0.1:8000
 ui.py           the earlier Streamlit front end (optional)
 transit/web/    FastAPI: 5 endpoints, SSE for live tool calls
 assets/web/     index.html, app.css, app.js — hand-written, no build step
-scripts/        load_gtfs, load_guides, optimize_db, list_models, timing
+scripts/        load_gtfs, load_shapes, load_guides, optimize_db, list_models, timing
 data/           databases and downloads (gitignored)
 tests/
 ```
@@ -172,6 +173,18 @@ is the point; parallelism is a bonus.** Not a general upgrade: four subtasks cos
 ~26 requests where one agent might use 8. Forced `threadstate.py`, because two
 subagents writing to the same module-level dict produced no crash — just a trace
 mixing conversations.
+
+**Tool scoping.** Every schema is resent on every call — 13 of them is ~1,910
+tokens riding along 16-20 times a run, and a point-to-point question never
+touches the weather. `agent.run(tools="journey")` offers 8 instead of 13,
+saving ~740 tokens per call (~13,000 per run). `plan.py` uses it for both the
+research and repair passes.
+
+The trade is real: a tool the agent can't call is a move it can't make, so the
+default stays everything and the evals decide whether narrowing cost anything.
+The cache key hashes the schemas ACTUALLY sent — keying a narrowed request the
+same as a full one would return the wrong answer confidently, which is worse
+than a miss.
 
 **10 — the same thing in LangGraph.** `pip install langgraph
 langgraph-checkpoint-sqlite`, then `python graph.py --draw`.

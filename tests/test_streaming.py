@@ -323,6 +323,61 @@ def test_map_geometry():
     check("a Toronto point is accepted", view._in_toronto(43.65, -79.38))
 
 
+def test_route_geometry():
+    section("real track geometry, and honest fallback")
+
+    from transit import paths as _paths
+    from transit.pipeline import view
+
+    if not _paths.TRANSIT_DB.exists():
+        print("  (skipped: transit.db not built)")
+        return
+
+    if not view.has_shapes():
+        # Optional table. Saying so beats a silent skip — the map still works
+        # without it, just with straight lines.
+        print("  (skipped: shapes not loaded — run scripts/load_shapes.py)")
+        return
+
+    pts = view.leg_shape("510", "Spadina Ave at Nassau St South Side (8128)",
+                         "Spadina Ave at King St West")
+    check("a real leg gets real geometry", pts is not None and len(pts) > 2)
+    check("points are [lon, lat] pairs",
+          all(len(p) == 2 for p in pts))
+    check("and they stay in Toronto",
+          all(view._in_toronto(lat, lon) for lon, lat in pts))
+
+    # The whole point of slicing by shape_dist_traveled rather than snapping
+    # to the nearest point: the geometry must START at the boarding stop, not
+    # wherever the route happens to pass closest.
+    start = view.locate("Spadina Ave at Nassau St South Side (8128)")
+    first_lon, first_lat = pts[0]
+    check("the line starts at the boarding stop",
+          abs(first_lat - start[0]) < 0.002 and abs(first_lon - start[1]) < 0.002)
+
+    check("a route that doesn't serve those stops has no shape",
+          view.leg_shape("504", "Spadina Ave at Nassau St South Side",
+                         "Spadina Ave at King St West"), None)
+    check("neither does a nonexistent route",
+          view.leg_shape("999", "A", "B"), None)
+
+    # Falling back to a straight line is fine and must be LABELLED. An
+    # approximate line is honest cartography; an unlabelled one invites the
+    # reader to believe the route runs where it doesn't.
+    itinerary = _Itin([
+        _Leg("streetcar", "510", "Spadina Ave at Nassau St South Side",
+             "Spadina Ave at King St West", 8),
+        _Leg("walk", None, "Spadina Ave at King St West",
+             "King St West at Spadina Ave East Side", 2),
+    ])
+    layers = view.map_layers(itinerary)
+    exact = [p["exact"] for p in layers["paths"]]
+    check("the transit leg is exact", exact[0], True)
+    check("the walk is not, and says so", exact[1], False)
+    check("an exact leg has more than two points",
+          len(layers["paths"][0]["path"]) > 2)
+
+
 def test_timeline_markup():
     section("the timeline, as markup a test can read")
 
@@ -488,6 +543,7 @@ if __name__ == "__main__":
                test_counters_reset_between_runs,
                test_concurrency_is_declared_not_guessed,
                test_map_geometry,
+               test_route_geometry,
                test_timeline_markup,
                test_stat_cards_show_severity,
                test_json_for_the_browser):

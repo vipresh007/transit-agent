@@ -175,8 +175,18 @@ def map_layers(itinerary, allow_network: bool = False) -> dict:
             })
 
         if start and end:
+            # Real track geometry when we have it, a straight line when we
+            # don't. Approximating a LINE is fine — it's cartography. The
+            # project refuses to approximate a departure time because that's
+            # a claim about the world; where the rails physically run is not
+            # something the traveller acts on minute by minute.
+            shape = None
+            if leg.mode != "walk":
+                shape = leg_shape(leg.route, leg.origin, leg.destination)
+
             paths_out.append({
-                "path": [[start[1], start[0]], [end[1], end[0]]],
+                "path": shape or [[start[1], start[0]], [end[1], end[0]]],
+                "exact": shape is not None,
                 "colour": list(MODE_COLOUR.get(leg.mode, MODE_COLOUR["bus"])),
                 "mode": leg.mode,
                 "label": (f"walk {leg.duration_min} min" if leg.mode == "walk"
@@ -386,3 +396,106 @@ def result_to_dict(result, allow_network: bool = False) -> dict:
         payload["map"] = map_layers(itinerary, allow_network=allow_network)
         payload["viewport"] = viewport(payload["map"]["points"])
     return payload
+
+
+def has_shapes() -> bool:
+    """Is the optional geometry table loaded?"""
+    if not paths.TRANSIT_DB.exists():
+        return False
+    conn = sqlite3.connect(paths.readonly_uri(paths.TRANSIT_DB), uri=True)
+    try:
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='shapes'"
+        ).fetchone() is not None
+    finally:
+        conn.close()
+
+
+def leg_shape(route: str, origin: str, destination: str,
+              service_id: str = "1") -> list[list[float]] | None:
+    """The real track between two stops, as [[lon, lat], ...].
+
+    Sliced by shape_dist_traveled — the distance along the route recorded
+    against both the shape points and the stop times. That makes it a range
+    query rather than a nearest-point guess, which matters on any route that
+    passes near its own path twice: a loop, or a branch that doubles back.
+    Snapping by proximity would silently pick the wrong side.
+
+    Returns None when the geometry isn't available, so the caller can fall
+    back to a straight line rather than draw nothing. An approximate line is
+    honest here in a way an approximate DEPARTURE never would be — this is
+    cartography, not a claim about when a streetcar leaves.
+    """
+    if not route or not has_shapes():
+        return None
+
+    name_a, id_a = constraints.split_stop_label(origin)
+    name_b, id_b = constraints.split_stop_label(destination)
+
+    conn = sqlite3.connect(paths.readonly_uri(paths.TRANSIT_DB), uri=True)
+    try:
+        # Resolve the route label the SAME way the schedule verifier does.
+        # This matched route_short_name exactly and so found nothing for
+        # "510 Spadina" or "504A" — both of which constraints.resolve_route
+        # has handled since stage 7. The fix already existed in this codebase
+        # and simply wasn't reused, which is its own lesson: a normalisation
+        # that only one caller applies is a normalisation the next caller
+        # will get wrong.
+        resolved = constraints.resolve_route(conn, route)
+        if not resolved:
+            return None
+        route = resolved
+
+        # One trip that serves BOTH stops, in order. Any such trip's shape is
+        # the path this leg follows.
+        row = conn.execute(
+            """
+            -- CAST because load_gtfs stores every GTFS column as TEXT, and
+            -- shapes.shape_dist_traveled is REAL. Comparing the two compares
+            -- a number against a string: SQLite returns nothing, quietly.
+            -- Exactly the trap the zero-padded departure times set, one
+            -- column over. Numeric-looking TEXT is still TEXT.
+            SELECT t.shape_id,
+                   CAST(a.shape_dist_traveled AS REAL),
+                   CAST(b.shape_dist_traveled AS REAL)
+            FROM trips t
+            JOIN routes r      ON r.route_id = t.route_id
+            JOIN stop_times a  ON a.trip_id = t.trip_id
+            JOIN stop_times b  ON b.trip_id = t.trip_id
+            JOIN stops sa      ON sa.stop_id = a.stop_id
+            JOIN stops sb      ON sb.stop_id = b.stop_id
+            WHERE r.route_short_name = ?
+              AND t.service_id = ?
+              AND (sa.stop_id = ? OR sa.stop_name LIKE ?)
+              AND (sb.stop_id = ? OR sb.stop_name LIKE ?)
+              AND CAST(b.stop_sequence AS INTEGER) > CAST(a.stop_sequence AS INTEGER)
+              AND t.shape_id IS NOT NULL AND t.shape_id != ''
+              -- The first stop of a trip has an empty distance, not a zero.
+              AND a.shape_dist_traveled != '' AND b.shape_dist_traveled != ''
+            LIMIT 1
+            """,
+            (route, service_id,
+             id_a or "", f"%{name_a}%",
+             id_b or "", f"%{name_b}%"),
+        ).fetchone()
+        if not row:
+            return None
+
+        shape_id, start, end = row
+        if start is None or end is None:
+            return None
+
+        points = conn.execute(
+            """
+            SELECT shape_pt_lon, shape_pt_lat FROM shapes
+            WHERE shape_id = ? AND shape_dist_traveled BETWEEN ? AND ?
+            ORDER BY shape_dist_traveled
+            """,
+            (shape_id, min(start, end), max(start, end)),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    # Two points is what a straight line already gives us; below that the
+    # slice found nothing useful.
+    return [[lon, lat] for lon, lat in points] if len(points) > 2 else None

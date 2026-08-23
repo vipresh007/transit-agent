@@ -185,8 +185,14 @@ def _backoff(exc, attempt: int, attempts: int, delay: float, verbose: bool) -> N
     _slept(wait)
 
 
-def call_model(messages, attempts: int = 5, verbose: bool = True, use_tools: bool = True):
-    """Send a request, surviving the ways free tiers fail."""
+def call_model(messages, attempts: int = 5, verbose: bool = True,
+               use_tools: bool = True, schemas=None):
+    """Send a request, surviving the ways free tiers fail.
+
+    `schemas` narrows the tools offered for this call. Defaults to all of
+    them: a caller that doesn't think about it gets what it always got.
+    """
+    schemas = TOOL_SCHEMAS if schemas is None else schemas
     delay = 2.0
     last_exc: Exception | None = None
     waits = 0
@@ -205,7 +211,7 @@ def call_model(messages, attempts: int = 5, verbose: bool = True, use_tools: boo
 
         if cache.ENABLED:
             key = cache.key_for(providers.model(), sent, use_tools,
-                                providers.TEMPERATURE)
+                                providers.TEMPERATURE, schemas)
             hit = cache.read(key)
             if hit is not None:
                 cache.STATS["hits"] += 1
@@ -229,7 +235,7 @@ def call_model(messages, attempts: int = 5, verbose: bool = True, use_tools: boo
                 temperature=providers.TEMPERATURE,
                 # Omitting tools entirely is what forces a text answer. Asking
                 # nicely in the prompt is not reliable; removing the option is.
-                tools=TOOL_SCHEMAS if use_tools else None,
+                tools=schemas if use_tools else None,
                 extra_body=providers.extra_body(),
             )
             # Only a request that RETURNED counts as model time. A call that

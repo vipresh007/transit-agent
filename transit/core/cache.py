@@ -41,12 +41,27 @@ TOOLS_FINGERPRINT = hashlib.sha256(
 ).hexdigest()[:12]
 
 
-def key_for(model: str, messages: list, use_tools: bool, temperature: float) -> str:
+def fingerprint(schemas) -> str:
+    """Hash the schemas ACTUALLY SENT.
+
+    Now that a run can narrow its tool set, hashing the global list would key
+    a journey-scoped request the same as a full one — and a cache that
+    conflates two different requests returns the wrong answer confidently.
+    That's strictly worse than a miss.
+    """
+    if schemas is None or schemas is TOOL_SCHEMAS:
+        return TOOLS_FINGERPRINT
+    return hashlib.sha256(
+        json.dumps(schemas, sort_keys=True).encode()).hexdigest()[:12]
+
+
+def key_for(model: str, messages: list, use_tools: bool, temperature: float,
+            schemas=None) -> str:
     blob = json.dumps(
         {
             "model": model,
             "messages": messages,
-            "tools": TOOLS_FINGERPRINT if use_tools else None,
+            "tools": fingerprint(schemas) if use_tools else None,
             "temperature": temperature,
         },
         sort_keys=True,

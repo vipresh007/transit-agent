@@ -190,6 +190,57 @@ def test_retry_and_quota():
     check("a genuine 400 is not retried", slept.call_count, 0)
 
 
+def test_tool_scoping():
+    section("only offering the tools a task needs")
+
+    from transit.tools import TOOL_SETS, schemas_for
+
+    full = schemas_for(None)
+    journey = schemas_for(TOOL_SETS["journey"])
+    check("the default is still everything", len(full), 13)
+    check("journey is narrower", len(journey) < len(full))
+
+    # The saving is the whole point, and it's per-call: every schema rides
+    # along on all 16-20 requests of a run.
+    import json
+    saved = (len(json.dumps(full)) - len(json.dumps(journey))) // 4
+    check("journey saves ~700+ tokens per call", saved > 700)
+
+    names = {s["function"]["name"] for s in journey}
+    check("it keeps the schedule tools", "plan_journey" in names)
+    check("and preferences", "recall_preferences" in names)
+    check("but drops the guides", "search_guides" not in names)
+    check("and the weather", "get_weather" not in names)
+
+    # A typo'd tool name that silently sends fewer tools than intended is the
+    # exact kind of absence this project keeps learning to surface.
+    try:
+        schemas_for(["plan_journey", "teleport"])
+        check("an unknown tool name raises", False)
+    except ValueError as exc:
+        check("an unknown tool name raises", "teleport" in str(exc))
+
+    # THE CACHE MUST SEE THE DIFFERENCE. Keying a narrowed request the same as
+    # a full one would return the wrong cached answer confidently, which is
+    # strictly worse than a miss.
+    from transit.core import cache
+    msgs = [{"role": "user", "content": "x"}]
+    wide = cache.key_for("m", msgs, True, 0, full)
+    narrow = cache.key_for("m", msgs, True, 0, journey)
+    check("a narrowed run gets its own cache key", wide != narrow)
+    check("and None still means the full set",
+          cache.key_for("m", msgs, True, 0, None), wide)
+
+    # What actually reaches the provider.
+    providers._active = 0
+    fake, td = fresh([says("done")])
+    with td, patch("time.sleep"):
+        llm.call_model([{"role": "user", "content": "x"}], verbose=False,
+                       schemas=journey)
+    sent = fake.chat.completions.create.call_args.kwargs["tools"]
+    check("the narrowed set is what gets sent", len(sent), len(journey))
+
+
 def test_failover():
     section("provider failover")
 
@@ -468,7 +519,8 @@ def test_retrieval_telemetry():
 
 
 if __name__ == "__main__":
-    for fn in (test_retry_and_quota, test_failover,
+    for fn in (test_retry_and_quota,
+               test_tool_scoping, test_failover,
                test_sanitize_follows_the_provider, test_loop_guards,
                test_verification_guards, test_result_clipping,
                test_grounding_pushback, test_retrieval_telemetry):

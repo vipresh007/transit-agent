@@ -261,20 +261,65 @@ function buildMap(el, d) {
     return;
   }
 
-  L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
-    attribution: '&copy; OpenStreetMap &copy; CARTO',
-    maxZoom: 19,
+  // Voyager by default, not dark_matter. The dark basemap matched the page
+  // beautifully and hid the streets, which is the one thing a transit map has
+  // to show. A map you can't read is decoration.
+  //
+  // Both are free, no key. The toggle is remembered per browser.
+  const BASEMAPS = {
+    streets: {
+      url: "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
+      label: "Dark",
+    },
+    dark: {
+      url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+      label: "Streets",
+    },
+  };
+  let style = localStorage.getItem("basemap") || "streets";
+
+  let tiles = L.tileLayer(BASEMAPS[style].url, {
+    attribution: "&copy; OpenStreetMap &copy; CARTO", maxZoom: 19,
   }).addTo(map);
+
+  const Toggle = L.Control.extend({
+    options: { position: "topright" },
+    onAdd() {
+      const btn = L.DomUtil.create("button", "basemap-toggle");
+      btn.textContent = BASEMAPS[style].label;
+      L.DomEvent.disableClickPropagation(btn);
+      btn.onclick = () => {
+        style = style === "streets" ? "dark" : "streets";
+        localStorage.setItem("basemap", style);
+        map.removeLayer(tiles);
+        tiles = L.tileLayer(BASEMAPS[style].url, {
+          attribution: "&copy; OpenStreetMap &copy; CARTO", maxZoom: 19,
+        }).addTo(map);
+        tiles.bringToBack();
+        btn.textContent = BASEMAPS[style].label;
+      };
+      return btn;
+    },
+  });
+  map.addControl(new Toggle());
 
   layer = L.layerGroup().addTo(map);
 
   let drawn = 0;
   for (const p of d.map.paths) {
     const pts = p.path.map(([lon, lat]) => [lat, lon]);
+    // Casing: a wide dark line under a narrower coloured one. Without it a
+    // red route over a red-brick street map is nearly invisible, and route
+    // colours are the whole point of colouring them.
+    L.polyline(pts, {
+      color: "#0b1018", weight: p.mode === "walk" ? 7 : 10,
+      opacity: 0.55, lineCap: "round", lineJoin: "round",
+    }).addTo(layer);
+
     const line = L.polyline(pts, {
       color: `rgb(${p.colour.join(",")})`,
       weight: p.mode === "walk" ? 4 : 6,
-      opacity: p.mode === "walk" ? 0.7 : 0.95,
+      opacity: p.mode === "walk" ? 0.85 : 1,
       dashArray: p.dashed ? "8 10" : undefined,
       lineCap: "round", lineJoin: "round",
     });
@@ -284,7 +329,7 @@ function buildMap(el, d) {
 
   for (const s of d.map.points) {
     L.circleMarker([s.lat, s.lon], {
-      radius: 7, color: "#0b0f16", weight: 3,
+      radius: 7, color: "#0b1018", weight: 3,
       fillColor: "#ffffff", fillOpacity: 1,
     }).addTo(layer).bindPopup(esc(s.name));
   }
@@ -306,8 +351,15 @@ function buildMap(el, d) {
   // different problems, and from outside they look the same.
   const tally = document.getElementById("tally");
   if (tally) {
+    // Say which lines are real track and which are straight-line guesses.
+    // An approximate line is fine; an unlabelled one invites the reader to
+    // believe the route runs where it doesn't.
+    const exact = d.map.paths.filter((p) => p.exact).length;
+    const approx = d.map.paths.filter((p) => !p.exact && p.mode !== "walk").length;
     tally.textContent =
-      `${d.map.points.length} stops · ${drawn} legs drawn` +
+      `${d.map.points.length} stops · ${drawn} legs` +
+      (exact ? ` · ${exact} on real track` : "") +
+      (approx ? ` · ${approx} approximate` : "") +
       (d.map.unresolved.length ? ` · ${d.map.unresolved.length} unplaced` : "");
   }
 }

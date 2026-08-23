@@ -310,3 +310,52 @@ TOOL_FUNCTIONS = {
 # sits far away from the thing it registers will always drift; keeping it
 # adjacent at least makes the omission visible when you add a tool.
 SCHEDULE_TOOLS = {"query_transit", "find_direct_trips", "plan_journey"}
+
+
+# ---------------------------------------------------------------------------
+# Tool sets
+#
+# Every schema is resent on EVERY call. Thirteen of them is ~1,910 tokens
+# riding along 16-20 times a run, and a journey question never touches the
+# weather or the travel guides. One conversation reached 9,489 tokens against
+# Groq's 8,000-per-minute cap and was rejected outright — a size problem no
+# amount of waiting fixes.
+#
+# The trade is real, not free. Removing a tool removes an option: an agent
+# that cannot call search_guides cannot notice that the answer needed prose.
+# So the sets overlap deliberately and the default stays everything — narrow
+# only where the task is genuinely known, and let the evals say whether it
+# cost anything.
+# ---------------------------------------------------------------------------
+
+TOOL_SETS = {
+    # Point-to-point travel. No guides, no weather, no POI search.
+    "journey": [
+        "recall_preferences", "geocode", "check_mode_feasibility",
+        "plan_journey", "find_direct_trips", "find_nearby_stops",
+        "query_transit", "describe_transit_schema",
+    ],
+    # "What's it like there", "where should I eat" — prose questions.
+    "explore": [
+        "recall_preferences", "geocode", "search_guides", "find_pois",
+        "get_weather",
+    ],
+    # Everything. The default, and what agent.py uses unless told otherwise.
+    "all": [schema["function"]["name"] for schema in TOOL_SCHEMAS],
+}
+
+
+def schemas_for(names) -> list:
+    """The subset of TOOL_SCHEMAS matching `names`, in the registry's order.
+
+    Raises on an unknown name rather than silently sending fewer tools than
+    intended. A typo'd tool name that quietly disappears is exactly the kind
+    of absence this project keeps learning to make visible.
+    """
+    if names is None:
+        return TOOL_SCHEMAS
+    wanted = set(names)
+    unknown = wanted - {s["function"]["name"] for s in TOOL_SCHEMAS}
+    if unknown:
+        raise ValueError(f"unknown tool(s): {sorted(unknown)}")
+    return [s for s in TOOL_SCHEMAS if s["function"]["name"] in wanted]

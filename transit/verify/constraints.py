@@ -157,27 +157,54 @@ def resolve_route(conn, label: str) -> str | None:
 
 
 # find_nearby_stops returns "NAME (STOP_ID)", and the model copies that label
-# straight into the itinerary — reasonably, since it disambiguates the platform.
-STOP_ID_SUFFIX = re.compile(r"\s*\((\d+)\)\s*$")
+# into the itinerary — reasonably, since it disambiguates the platform. But it
+# does not copy it the same way twice. Across real runs it produced:
+#
+#     Spadina Ave at Nassau St South Side
+#     Spadina Ave at Nassau St South Side (8128)
+#     Spadina Ave at Nassau St South Side (stop 8128)
+#     Stop 8128 (Spadina Ave at Nassau St South Side)
+#
+# All four mean one platform. A parser that knows one of them silently fails
+# on the rest: two whole journeys resolved to ZERO map points, and — far worse
+# — the schedule verifier reported false violations on correct legs, because
+# `LIKE '%Name (stop 8128)%'` matches no stop_name either.
+#
+# Fifth time in this project that a checker has failed on a label written a
+# way it didn't expect. Parse the shapes the model ACTUALLY produces, not the
+# one shape the tool emits.
+STOP_ID_TRAILING = re.compile(r"\s*\(\s*(?:stop\s*)?(\d+)\s*\)\s*$", re.I)
+STOP_ID_LEADING = re.compile(r"^\s*stop\s*#?\s*(\d+)\s*[:\-–]?\s*\((.+)\)\s*$", re.I)
+STOP_ID_BARE = re.compile(r"^\s*stop\s*#?\s*(\d+)\s*[:\-–]\s*(.+)$", re.I)
 
 
 def split_stop_label(label: str) -> tuple[str, str | None]:
-    """'Spadina Ave at Nassau St South Side (8128)' -> (name, '8128').
+    """Any of the ways a stop gets written -> (name, stop_id or None).
 
-    A checker that demands the exact internal spelling will keep firing on
-    correct answers, and every false positive costs a full repair round. This
-    is the same failure `resolve_route` was written for, one level down: two
-    real departures were flagged because `LIKE '%... (8128)%'` matches no
-    stop_name, since the id isn't part of the name.
-
-    The id is a gift when present — matching on stop_id pins the exact
+    The id is a gift when present: matching on stop_id pins the exact
     platform, which is stronger than a LIKE on a name shared by both
     directions of a street.
     """
-    match = STOP_ID_SUFFIX.search(label or "")
+    text = (label or "").strip()
+    if not text:
+        return "", None
+
+    # "Stop 8128 (Spadina Ave at Nassau St South Side)"
+    match = STOP_ID_LEADING.match(text)
     if match:
-        return label[:match.start()].strip(), match.group(1)
-    return (label or "").strip(), None
+        return match.group(2).strip(), match.group(1)
+
+    # "Stop 8128 - Spadina Ave at Nassau St"
+    match = STOP_ID_BARE.match(text)
+    if match:
+        return match.group(2).strip(), match.group(1)
+
+    # "... (8128)" or "... (stop 8128)"
+    match = STOP_ID_TRAILING.search(text)
+    if match:
+        return text[:match.start()].strip(), match.group(1)
+
+    return text, None
 
 
 def _departure_is_scheduled(conn, route: str, stop_name: str, depart: str,

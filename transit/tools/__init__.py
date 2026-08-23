@@ -18,7 +18,8 @@ Import from the package, not the submodules:
 from .geo import find_pois, geocode, get_weather
 from .guides import guides_status, search_guides
 from .journey import plan_journey
-from .registry import SCHEDULE_TOOLS, TOOL_FUNCTIONS, TOOL_SCHEMAS
+from .registry import (SCHEDULE_TOOLS, TOOL_FUNCTIONS, TOOL_SCHEMAS,
+                       TOOL_SETS, schemas_for)
 from .transit import (
     DB_PATH,
     describe_transit_schema,
@@ -32,6 +33,8 @@ __all__ = [
     "SCHEDULE_TOOLS",
     "TOOL_FUNCTIONS",
     "TOOL_SCHEMAS",
+    "TOOL_SETS",
+    "schemas_for",
     "describe_transit_schema",
     "find_direct_trips",
     "find_nearby_stops",
