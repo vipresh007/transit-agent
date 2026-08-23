@@ -9,6 +9,8 @@ failures are worth retrying, which are worth waiting out, and which mean stop:
   tool_use_failed 400       the MODEL emitted bad JSON; resample
   output_parse_failed 400   the MODEL wrote prose where a tool call belonged;
                             resample
+  413 request too large     the conversation exceeds this provider's
+                            per-minute token budget; waiting cannot shrink it
   any other 400             OUR request is malformed; retrying fails slower
   404 model not found       config error; say so and stop
 
@@ -25,6 +27,7 @@ import time
 
 from openai import (
     APIConnectionError,
+    APIStatusError,
     APITimeoutError,
     BadRequestError,
     InternalServerError,
@@ -50,18 +53,21 @@ USAGE = {"n": 0, "prompt_tokens": 0, "completion_tokens": 0}
 #   wait_seconds    time WE spent asleep on rate limits and backoff. Fix by
 #                   pinning a provider, pacing, or waiting for quota to reset.
 #   throttle_seconds  our own deliberate pacing between requests.
+#   failed_seconds  round trips that came back an error. Real time, but
+#                   neither generation nor sleeping — a rejected request still
+#                   crosses the network twice.
 #
 # A 60-second run that was 55s generating and a 60-second run that was 55s
 # sleeping look identical from outside and share no remedy. Measuring the
 # aggregate would have sent us optimising the prompt when the real answer was
 # "you burned Groq's daily quota an hour ago".
 TIMING = {"model_seconds": 0.0, "wait_seconds": 0.0, "throttle_seconds": 0.0,
-          "latencies": []}
+          "failed_seconds": 0.0, "latencies": []}
 
 
 def reset_timing() -> None:
     TIMING.update(model_seconds=0.0, wait_seconds=0.0, throttle_seconds=0.0,
-                  latencies=[])
+                  failed_seconds=0.0, latencies=[])
 
 
 def reset_run() -> None:
@@ -96,6 +102,7 @@ def timing_summary() -> dict:
         "model_seconds": round(TIMING["model_seconds"], 1),
         "wait_seconds": round(TIMING["wait_seconds"], 1),
         "throttle_seconds": round(TIMING["throttle_seconds"], 1),
+        "failed_seconds": round(TIMING["failed_seconds"], 1),
         "calls": len(lat),
         "slowest_call": lat[-1] if lat else 0.0,
         "median_call": lat[len(lat) // 2] if lat else 0.0,
@@ -153,6 +160,8 @@ def usage_line() -> str:
         timing.append(f"{TIMING['wait_seconds']:.0f}s waiting")
     if TIMING["throttle_seconds"] >= 1:
         timing.append(f"{TIMING['throttle_seconds']:.0f}s paced")
+    if TIMING["failed_seconds"] >= 1:
+        timing.append(f"{TIMING['failed_seconds']:.0f}s rejected")
     if TIMING["latencies"]:
         timing.append(f"slowest {max(TIMING['latencies']):.0f}s")
     parts.append(", ".join(timing))
@@ -182,6 +191,7 @@ def call_model(messages, attempts: int = 5, verbose: bool = True, use_tools: boo
     last_exc: Exception | None = None
     waits = 0
     counted_miss = False
+    last_stated: float | None = None
 
     for attempt in range(attempts):
         # Sanitize and key INSIDE the loop. Both depend on which provider is
@@ -212,6 +222,7 @@ def call_model(messages, attempts: int = 5, verbose: bool = True, use_tools: boo
 
             USAGE["n"] += 1
             started = time.perf_counter()
+            attempted = started
             response = providers.client().chat.completions.create(
                 model=providers.model(),
                 messages=sent,
@@ -237,13 +248,37 @@ def call_model(messages, attempts: int = 5, verbose: bool = True, use_tools: boo
             return response
 
         except RateLimitError as exc:
+            # A rejected request still crossed the network twice. Excluding it
+            # entirely left 52 seconds of a 325-second run filed under "our own
+            # python", which reads like a performance bug in our code rather
+            # than 14 requests bouncing off a rate limit.
+            TIMING["failed_seconds"] += time.perf_counter() - attempted
             last_exc = exc
             stated = server_retry_delay(exc)
+
+            # IS THE WAIT GETTING US ANYWHERE? A rolling window DRAINS: each
+            # wait leaves less to wait. A hard daily cap does not. Gemini's
+            # free tier is 20 requests/day for this model and it answered
+            # "retry in 57s" four times running — we spent nearly four minutes
+            # asleep to learn nothing, then raised a raw traceback.
+            #
+            # A delay that stops shrinking is the signal, and unlike parsing
+            # each vendor's quota vocabulary it works for vendors we haven't
+            # met. Still gated on _is_daily_quota so a genuinely busy minute
+            # isn't mistaken for an exhausted day.
+            stalled = (_is_daily_quota(exc) and stated is not None
+                       and last_stated is not None and stated >= last_stated - 1)
+            if stalled:
+                _log(f"~ retry delay is not shrinking ({last_stated:.0f}s -> "
+                     f"{stated:.0f}s) — this is a daily cap, not a busy minute",
+                     verbose)
+            last_stated = stated
 
             # A stated delay beats our classification: Groq's "tokens per day"
             # limit is a ROLLING window that can clear in minutes, and treating
             # it as terminal threw away a run that needed to wait five.
-            if stated is not None and stated <= providers.MAX_WAIT_SECONDS:
+            if (not stalled and stated is not None
+                    and stated <= providers.MAX_WAIT_SECONDS):
                 waits += 1
                 # Throttled twice means saturated, not momentarily busy.
                 if waits >= 2 and providers.switch(_switch_note(verbose)):
@@ -290,6 +325,7 @@ def call_model(messages, attempts: int = 5, verbose: bool = True, use_tools: boo
             delay = min(delay * 2, 60.0)
 
         except BadRequestError as exc:
+            TIMING["failed_seconds"] += time.perf_counter() - attempted
             # Most 400s mean OUR request is malformed, and retrying just fails
             # slower. Two of Groq's do not — they mean the MODEL produced
             # something the provider's own parser rejected, which is a sampling
@@ -317,11 +353,48 @@ def call_model(messages, attempts: int = 5, verbose: bool = True, use_tools: boo
             _slept(1 + random.uniform(0, 1))
 
         except RETRIABLE as exc:
+            TIMING["failed_seconds"] += time.perf_counter() - attempted
             last_exc = exc
             if attempt == attempts - 1:
                 raise
             _backoff(exc, attempt, attempts, delay, verbose)
             delay *= 2
+
+        # LAST, deliberately. RateLimitError, BadRequestError AND
+        # InternalServerError all subclass APIStatusError, so placing this
+        # earlier swallowed 400s that should resample and 503s that should
+        # retry. Python picks the FIRST matching handler, not the most
+        # specific one — with an exception hierarchy, handler order IS the
+        # logic. Catching a base class is only safe at the bottom.
+        #
+        # The test harness stubbed these as flat Exception subclasses, so it
+        # passed either way. A double simpler than the real thing stops
+        # testing the part that's actually hard; it now mirrors the SDK.
+        except APIStatusError as exc:
+            # 413: the request is larger than the provider's per-minute token
+            # budget. Groq free tier is 8,000 TPM and our conversation reached
+            # 9,489 — no amount of waiting makes a single request smaller than
+            # a cap it already exceeds, so this is a hard "not here", not a
+            # "not yet". Distinguishing the two is the same call as daily
+            # quota vs busy minute, one layer down.
+            if getattr(exc, "status_code", None) != 413:
+                raise
+            TIMING["failed_seconds"] += time.perf_counter() - attempted
+            last_exc = exc
+            over = providers.describe()
+            if providers.switch(_switch_note(verbose)):
+                _log(f"~ conversation too large for {over}'s per-minute "
+                     f"budget — switching to {providers.describe()}", verbose)
+                continue
+            raise DailyQuotaExhausted(
+                f"The conversation no longer fits {over}'s per-minute token "
+                f"budget, and no other provider is available.\n"
+                f"{USAGE['prompt_tokens']:,} prompt tokens used this run.\n\n"
+                f"This is a SIZE problem, not a quota one — waiting won't "
+                f"help. Shorten the conversation: fewer tools in scope, a "
+                f"smaller MAX_RESULT_CHARS, or a provider with a larger "
+                f"per-minute allowance."
+            ) from exc
 
     # Every `continue` above falls through to here once attempts run out.
     # Without this the function returns None and the caller dies on

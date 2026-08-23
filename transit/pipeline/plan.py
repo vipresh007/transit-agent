@@ -465,6 +465,12 @@ def main() -> None:
     """
     try:
         _plan()
+    except llm.DailyQuotaExhausted as exc:
+        # Not a crash: an expected, explained end state. A traceback here
+        # implies something is broken and invites debugging, when the correct
+        # response is "come back tomorrow or change provider".
+        print(f"\n{exc}", file=sys.stderr)
+        sys.exit(1)
     except Exception:
         import traceback
         # A crash is precisely when the trace is most useful, and precisely

@@ -326,6 +326,30 @@ def test_env_is_loaded_once_by_the_package():
     check("nothing else calls it", sorted(set(stragglers)), [])
 
 
+def test_only_one_openai_stub():
+    section("one test double, not several")
+
+    # test_crew.py hand-rolled a second openai stub. When _harness gained
+    # APIStatusError to mirror the SDK hierarchy, the copy didn't, and the
+    # whole suite died on an import. Two doubles for one dependency is two
+    # things to keep in step, and the unofficial copy is the one that rots.
+    offenders = []
+    for path in (ROOT / "tests").glob("*.py"):
+        if path.name == "_harness.py":
+            continue
+        source = path.read_text(encoding="utf-8")
+        # Assembled at runtime so this file doesn't match itself. A detector
+        # written as a literal is part of its own haystack — the first run
+        # reported test_imports.py as the offender.
+        needle = "sys.modules[" + chr(34) + "openai"
+        if needle in source or needle.replace(chr(34), chr(39)) in source:
+            offenders.append(f"{rel(path)} builds its own openai stub — "
+                             f"use _harness.install_fake_openai()")
+    for o in offenders:
+        print(f"    {o}")
+    check("only _harness stubs the SDK", offenders, [])
+
+
 def test_every_package_is_importable():
     section("no package is missing its __init__.py")
 
@@ -342,6 +366,7 @@ if __name__ == "__main__":
                test_entry_points_are_thin, test_nothing_imports_a_root_launcher,
                test_no_logic_hides_in_a_main_guard,
                test_no_library_module_calls_sys_exit,
+               test_only_one_openai_stub,
                test_env_is_loaded_once_by_the_package,
                test_every_package_is_importable):
         fn()

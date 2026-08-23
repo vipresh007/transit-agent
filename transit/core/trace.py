@@ -116,7 +116,8 @@ def _timing(events: list | None = None, wall_seconds: float | None = None,
             # Python. Expected to be near zero; if it isn't, that's news.
             unaccounted_seconds=round(
                 wall - summary["model_seconds"] - summary["wait_seconds"]
-                - summary["throttle_seconds"] - tool_seconds, 1),
+                - summary["throttle_seconds"] - summary.get("failed_seconds", 0)
+                - tool_seconds, 1),
             step_gaps=gaps,
             # Told, not inferred. Inferring it from "the buckets exceed the
             # wall clock" declared a single-threaded plan.py run to be 1.7x

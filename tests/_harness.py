@@ -47,11 +47,17 @@ class FakeCompletion:
 def install_fake_openai():
     """Stub the SDK. Must run before importing any project module."""
     om = types.ModuleType("openai")
-    for name in (
-        "InternalServerError", "RateLimitError", "APIConnectionError",
-        "APITimeoutError", "NotFoundError", "BadRequestError",
-    ):
-        setattr(om, name, type(name, (Exception,), {}))
+    # MIRROR THE REAL HIERARCHY. Flat Exception subclasses let a handler
+    # ordering bug through: BadRequestError really subclasses APIStatusError,
+    # so an `except APIStatusError` placed first swallows every 400 — but with
+    # flat stubs the tests pass either way. A double that is simpler than the
+    # thing it stands in for stops testing the part that's hard.
+    om.APIStatusError = type("APIStatusError", (Exception,), {"status_code": None})
+    om.APIConnectionError = type("APIConnectionError", (Exception,), {})
+    om.APITimeoutError = type("APITimeoutError", (om.APIConnectionError,), {})
+    for name in ("InternalServerError", "RateLimitError", "NotFoundError",
+                 "BadRequestError"):
+        setattr(om, name, type(name, (om.APIStatusError,), {}))
     om.OpenAI = lambda **kw: MagicMock()
 
     types_mod = types.ModuleType("openai.types")

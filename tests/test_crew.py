@@ -11,20 +11,22 @@ something.
 Everything here runs against a scripted fake model: no API key, no quota.
 """
 
-import json, sys, types, os, time
+import json, sys, os, time
 from unittest.mock import MagicMock, patch
 from pathlib import Path
+
+# Use the SHARED stub. This file used to hand-roll its own, and it drifted:
+# when _harness gained APIStatusError to mirror the SDK's real hierarchy, this
+# copy didn't, and the whole suite failed on an import. Two doubles for one
+# dependency is two things to keep in step, and the one that isn't the
+# "official" copy is the one that rots.
+from _harness import install_fake_openai
+
+om = install_fake_openai()
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)
-om=types.ModuleType("openai")
-for n in ["InternalServerError","RateLimitError","APIConnectionError","APITimeoutError","NotFoundError","BadRequestError"]:
-    setattr(om,n,type(n,(Exception,),{}))
-om.OpenAI=lambda **kw: MagicMock()
-tm=types.ModuleType("openai.types"); cm=types.ModuleType("openai.types.chat"); cm.ChatCompletion=MagicMock()
-sys.modules["openai"]=om; sys.modules["openai.types"]=tm; sys.modules["openai.types.chat"]=cm
-dm=types.ModuleType("dotenv"); dm.load_dotenv=lambda *a,**k: None; sys.modules["dotenv"]=dm
 os.environ.update(GEMINI_API_KEY="g", CACHE="0", TRACE_DIR="/tmp/crewtrace")
 from transit.pipeline import crew
 from transit.core import agent

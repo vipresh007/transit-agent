@@ -21,8 +21,16 @@ python scripts/load_guides.py        # Wikivoyage -> data/guides.db     (~6 min)
 python tests/run_all.py              # verify, free
 ```
 
-Get a Gemini key at https://aistudio.google.com/apikey — no card needed. Free
-tiers move constantly; three model names here broke within a week. Run
+Get a Gemini key at https://aistudio.google.com/apikey — no card needed.
+
+**Budget the free tier before you plan your day around it.** Gemini's free
+tier allowed **20 requests/day** for `gemini-3.6-flash`, and one `plan.py` run
+costs 16-21 — so roughly one run per day, per model. Check what your key
+actually serves with `python scripts/list_models.py`; a smaller model often
+has a far larger daily allowance. Set `CACHE=1` and pin `PROVIDER=` while
+iterating so repeated questions cost nothing.
+
+Free tiers move constantly; three model names here broke within a week. Run
 `python scripts/list_models.py` to see what your keys actually serve, and avoid
 `-latest` aliases — they resolve to the newest model, which has the smallest
 quota. Providers are tried in order and fail over on a quota wall;
@@ -207,6 +215,26 @@ zero-minute walk and wrote *"a placeholder to satisfy schema requirements"*.
 
 **Normalise before comparing strings** — Unicode broke comparison three times:
 curly apostrophes, em-dashes, U+202F narrow no-break space.
+
+**A disclaimer followed by the number is worse than either half** — asked
+what a TTC fare costs, the agent said "the schedule has no fare data" and then
+added "$3.35 (as of 2023)". Readers keep the number and drop the caveat. The
+eval caught it; the fix is a prompt rule saying stop at the gap rather than
+filling it from memory.
+
+**With an exception hierarchy, handler order IS the logic** — Python picks
+the first matching `except`, not the most specific. `RateLimitError`,
+`BadRequestError` and `InternalServerError` all subclass `APIStatusError`, so
+a 413 handler placed early swallowed 400s that should resample and 503s that
+should retry. Catching a base class is only safe at the bottom. The test
+harness stubbed these as flat `Exception` subclasses and passed either way —
+**a double simpler than the real thing stops testing the part that's hard.**
+
+**A retry delay that stops shrinking is a cap, not a queue** — a rolling
+window drains, so each wait leaves less to wait. Gemini answered "retry in
+57s" four times running against a 20/day quota; we slept nearly four minutes
+to learn nothing. Watching whether the delay decreases beats parsing each
+vendor's quota vocabulary, and works for vendors you haven't met.
 
 **A library raises; only an entry point exits** — `providers.py` called
 `sys.exit()` at import when no API key was set. `SystemExit` is a

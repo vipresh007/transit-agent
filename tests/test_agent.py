@@ -110,6 +110,77 @@ def test_retry_and_quota():
     check("output_parse_failed resamples too",
           fake.chat.completions.create.call_count, 2)
 
+    # Failover is disabled for both of these: switching to another provider
+    # would answer a different question, and the harness's fake client doesn't
+    # survive providers.switch() rebuilding the client anyway.
+    no_failover = patch("transit.core.providers.switch", return_value=False)
+
+    # A stated delay that STOPS SHRINKING is a hard cap, not a busy minute.
+    # Gemini's free tier is 20 requests/day for this model and it answered
+    # "retry in 57s" four times running — four minutes asleep to learn
+    # nothing, then a raw traceback.
+    providers._active = 0
+    stalled = om.RateLimitError(
+        "429 Quota exceeded for metric: generate_content_free_tier_requests, "
+        "quotaId: 'GenerateRequestsPerDayPerProjectPerModel-FreeTier'. "
+        "Please retry in 57.35s")
+    fake, td = fresh([stalled, stalled, stalled, OK])
+    raised = None
+    with td, no_failover, patch("time.sleep") as slept:
+        try:
+            llm.call_model([{"role": "user", "content": "x"}], verbose=False)
+        except Exception as exc:                            # noqa: BLE001
+            raised = exc
+    check("a repeated delay gives up instead of sleeping through it",
+          slept.call_count, 1)
+    check("and says it's a daily quota, not a mystery",
+          isinstance(raised, llm.DailyQuotaExhausted))
+
+    # A delay that IS shrinking is a rolling window — Groq's tokens-per-day
+    # clears in minutes, and giving up on it threw away a whole run once.
+    providers._active = 0
+    fake, td = fresh([om.RateLimitError("429 per day. Please retry in 60s"),
+                      om.RateLimitError("429 per day. Please retry in 20s"),
+                      OK])
+    with td, no_failover, patch("time.sleep") as slept:
+        llm.call_model([{"role": "user", "content": "x"}], verbose=False)
+    check("a shrinking delay is waited out", slept.call_count, 2)
+    check("and the run then succeeds",
+          fake.chat.completions.create.call_count, 3)
+
+    # 413: the conversation is bigger than the provider's per-minute token
+    # budget. Groq free tier is 8,000 TPM and ours reached 9,489 — a single
+    # request larger than the cap can never fit, so waiting is pointless and
+    # failover is the only move. "Not here" vs "not yet", one layer down from
+    # daily quota vs busy minute.
+    providers._active = 0
+    too_big = om.APIStatusError("413 Request too large ... TPM Limit 8000, "
+                                "Requested 9489")
+    too_big.status_code = 413
+    fake, td = fresh([too_big, OK])
+    with td, patch("time.sleep") as slept:
+        llm.call_model([{"role": "user", "content": "x"}], verbose=False)
+    check("an oversized request fails over instead of sleeping",
+          slept.call_count, 0)
+    check("and the provider actually changed", providers._active, 1)
+
+    # ORDER IS THE LOGIC. Every one of these subclasses APIStatusError, so a
+    # base-class handler placed too early swallows all of them. This checks
+    # the specific behaviours survive.
+    providers._active = 0
+    fake, td = fresh([om.InternalServerError("503"), OK])
+    with td, patch("time.sleep"):
+        llm.call_model([{"role": "user", "content": "x"}], verbose=False)
+    check("a 503 still retries rather than hitting the 413 handler",
+          fake.chat.completions.create.call_count, 2)
+
+    providers._active = 0
+    fake, td = fresh([om.BadRequestError(TOOL_JSON_BAD), OK])
+    with td, patch("time.sleep"):
+        llm.call_model([{"role": "user", "content": "x"}], verbose=False)
+    check("tool_use_failed still resamples rather than hitting it too",
+          fake.chat.completions.create.call_count, 2)
+
     fake, td = fresh([om.BadRequestError("400 invalid schema")])
     with td, patch("time.sleep") as slept:
         try:

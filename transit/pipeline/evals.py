@@ -151,14 +151,36 @@ def case_earliest_501():
 def case_subway_lines():
     """Three subway lines exist. Tests basic retrieval, not reasoning."""
     conn = sqlite3.connect(paths.readonly_uri(DB), uri=True)
-    names = [r[0] for r in conn.execute(
-        "SELECT route_long_name FROM routes WHERE route_type = '1'")]
+    rows = conn.execute(
+        "SELECT route_short_name, route_long_name FROM routes "
+        "WHERE route_type = '1'").fetchall()
     conn.close()
-    keys = [n.split("(")[0].strip().lower() for n in names]
-    return (
-        f"answer mentions all of: {keys}",
-        lambda ans: all(normalize(k) in normalize(ans) for k in keys),
-    )
+
+    def check(ans: str) -> bool:
+        """Each line identified by NUMBER and NAME, in any layout.
+
+        Demanding the literal "line 1" failed a correct answer that used a
+        markdown table — `| 1 | Yonge-University |` names the line perfectly
+        and contains no such string. The checker was testing formatting.
+
+        Requiring both the number and a distinctive word from the long name
+        keeps it strict: a bare "1" somewhere in the prose isn't enough, and
+        neither is "Yonge" without the number.
+        """
+        flat = normalize(ans).lower()
+        for number, long_name in rows:
+            words = [w for w in re.findall(r"[a-z]+", long_name.lower())
+                     if len(w) > 4 and w != "line"]
+            numbered = re.search(rf"(?<!\d){re.escape(number)}(?!\d)", flat)
+            if not numbered or not any(w in flat for w in words):
+                return False
+        return True
+
+    listed = ", ".join(f"{n} ({ln.split('(')[0].strip()})" for n, ln in rows)
+    # Extra lines are fine: 5 Eglinton and 6 Finch West are in the feed as
+    # light rail, and the TTC brands them as lines too.
+    return (f"answer identifies each subway line by number and name: {listed}",
+            check)
 
 
 def case_bus_route_count():
@@ -311,8 +333,23 @@ def case_guide_out_of_scope():
     def check(ans: str) -> bool:
         flat = normalize(ans)
         # Must not present Toronto restaurants as an answer about Osaka.
-        pretends = "osaka" in flat and any(
-            w in flat for w in ["recommend", "try ", "you should visit"]
+        #
+        # Scoped to the SENTENCE, not the whole answer. A correct refusal —
+        # "I don't have coverage for Osaka. If you want ramen recommendations
+        # in Toronto, ask!" — contains both "osaka" and "recommend" and was
+        # marked FAIL. It was refusing and then offering to help, which is
+        # the behaviour we want.
+        #
+        # Fourth time in this project a checker has fired on a correct answer
+        # by matching vocabulary instead of meaning. Precision over recall:
+        # a false positive here would send you tuning a prompt that is fine.
+        pretends = any(
+            "osaka" in sentence
+            and any(w in sentence for w in ["recommend", "try ", "you should visit"])
+            and not any(w in sentence for w in
+                        ["if you", "feel free", "would you", "let me know",
+                         "happy to", "i can help"])
+            for sentence in re.split(r"[.!?\n]", flat)
         )
         admits = contains_any(ans, [
             "don't have", "do not have", "no information", "not cover",
@@ -381,6 +418,17 @@ SELFTEST = [
     ("subway_lines",
      "The TTC runs Line 1 (Yonge–University), Line 2 (Bloor–Danforth) "
      "and Line 4 (Sheppard).", True),
+    # A real answer the old checker rejected: a markdown table names every
+    # line correctly and contains the string "line 1" nowhere.
+    ("subway_lines",
+     "| Line # | Common name | Route |\n|---|---|---|\n"
+     "| 1 | Yonge-University | north-south on Yonge Street |\n"
+     "| 2 | Bloor-Danforth | east-west along Bloor and Danforth |\n"
+     "| 4 | Sheppard | east from Yonge along Sheppard Avenue |\n"
+     "| 5 | Eglinton | Eglinton Crosstown LRT |", True),
+    # Naming Yonge and Bloor without the numbers is not identifying them.
+    ("subway_lines",
+     "The TTC subway covers Yonge, Bloor and Sheppard.", False),
     ("subway_lines", "The TTC runs Line 1 and Line 2.", False),
     # Your first fully correct journey run, kept verbatim as a fixture.
     ("journey",
@@ -396,9 +444,27 @@ SELFTEST = [
      "car-free streets full of vintage shops.", True),
     ("guide_character",
      "Kensington Market is a nice area with shops and restaurants.", False),
+    # A real answer that the old checker rejected: it refuses correctly and
+    # then offers Toronto help, which put "osaka" and "recommend" in the same
+    # answer though not the same sentence.
+    ("guide_out_of_scope",
+     "I am a travel planning assistant for Toronto and only have access to "
+     "transit schedules and travel guides for the greater Toronto area. I "
+     "don't have guide data or local coverage for Osaka, Japan. If you are "
+     "looking for ramen recommendations or transit directions within Toronto, "
+     "feel free to ask!", True),
     ("guide_out_of_scope",
      "My guides only cover Toronto, so I don't have information on Osaka.",
      True),
+    # A real answer that the old checker rejected: it refuses correctly and
+    # then offers Toronto help, which put "osaka" and "recommend" in the same
+    # answer though not the same sentence.
+    ("guide_out_of_scope",
+     "I am a travel planning assistant for Toronto and only have access to "
+     "transit schedules and travel guides for the greater Toronto area. I "
+     "don't have guide data or local coverage for Osaka, Japan. If you are "
+     "looking for ramen recommendations or transit directions within Toronto, "
+     "feel free to ask!", True),
     ("guide_out_of_scope",
      "For ramen in Osaka you should try the places around Dotonbori.", False),
 ]
@@ -470,8 +536,27 @@ def main() -> None:
         requests = llm.USAGE["n"] - before
         passed = bool(answer) and check(answer) and error is None
 
-        status = "PASS" if passed else "FAIL"
+        # FAIL and ERROR are not the same finding and must not print the same.
+        # A 413 from Groq's token-per-minute cap was reported as [FAIL] with
+        # the exception text in the "got" field, which reads as "the model
+        # answered wrongly" — so you go tune the prompt when the actual news
+        # is that the request never completed. An eval that cannot tell "the
+        # answer was wrong" from "there was no answer" measures the wrong
+        # thing exactly when you most need it: while changing providers.
+        status = "PASS" if passed else ("ERROR" if error else "FAIL")
         print(f"[{status}] {name}  ({requests} req, {elapsed:.0f}s)")
+        if error:
+            print(f"         the run did not complete — this is NOT a quality")
+            print(f"         result. {error[:400]}")
+            print()
+            results.append((name, passed, True))
+            if any(k in error for k in ("Quota", "NotFound", "Authentication",
+                                        "too large", "rate_limit")):
+                print(f"Stopping: environment problem, not an agent failure.\n"
+                      f"  {error.splitlines()[0]}\n"
+                      f"  Try: python scripts/list_models.py")
+                break
+            continue
         if not passed:
             # Show enough of the answer to diagnose. 220 chars kept cutting off
             # before the actual number, which is the only part that matters.
@@ -482,20 +567,21 @@ def main() -> None:
                 print(f"                   ...({len(body) - 600} more chars)")
         print()
 
-        results.append((name, passed))
+        results.append((name, passed, False))
 
-        # A config error fails identically for every case. Stop rather than
-        # burning a request per case to learn the same thing six times.
-        if error and any(k in error for k in ("Quota", "NotFound", "Authentication")):
-            print(f"Stopping: environment problem, not an agent failure.\n"
-                  f"  {error.splitlines()[0]}\n"
-                  f"  Try: python scripts/list_models.py")
-            break
+    scored = [(n, p) for n, p, errored in results if not errored]
+    errored = [n for n, _, e in results if e]
+    passed = sum(p for _, p in scored)
 
-    passed = sum(p for _, p in results)
-    print(f"{passed}/{len(results)} passed  "
+    print(f"{passed}/{len(scored)} of the cases that RAN passed  "
           f"({llm.USAGE['n']} requests used)")
-    sys.exit(0 if passed == len(results) else 1)
+    if errored:
+        # Reported separately and never averaged in. Folding errors into the
+        # score would let a quota wall look like a quality regression.
+        print(f"{len(errored)} case(s) never completed: {', '.join(errored)}")
+        print("Those say nothing about answer quality — fix the environment "
+              "and re-run before drawing conclusions.")
+    sys.exit(0 if scored and passed == len(scored) else 1)
 
 
 if __name__ == "__main__":

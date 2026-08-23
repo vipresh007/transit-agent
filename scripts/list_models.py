@@ -71,13 +71,30 @@ def list_provider(prov: dict) -> None:
             note = "   <- alias/preview: unstable, avoid"
         # Match on token boundaries. Naive `"mini" in name` tagged every
         # single Gemini model as small, because "gemini" contains "mini".
-        elif re.search(r"(?:^|[-_/])(lite|mini|small|\d+b)(?:$|[-_/])", low):
-            note = "   <- small: biggest free quota, weakest at tool use"
+        elif _is_small(low):
+            note = "   <- small: usually a larger free quota, often weaker at tools"
         print(f"  {n}{note}")
 
     print(f"\n  {len(usable)} usable of {len(names)} total")
     if prov is AVAILABLE[0]:
         print("  (this is your primary provider)")
+
+
+# Anything at or below this many billion parameters is "small" for our
+# purposes. Without a threshold, `\d+b` called openai/gpt-oss-120b small —
+# the token boundary was right and the JUDGEMENT was missing. A size test
+# needs a size, not just a shape.
+SMALL_B = 30
+
+
+def _is_small(low: str) -> bool:
+    """Heuristic, and labelled as one. Providers don't publish quotas here."""
+    if re.search(r"(?:^|[-_/])(lite|mini|small)(?:$|[-_/])", low):
+        return True
+    for match in re.finditer(r"(?:^|[-_/])(\d+)b(?:$|[-_/])", low):
+        if int(match.group(1)) <= SMALL_B:
+            return True
+    return False
 
 
 def main() -> None:
@@ -93,6 +110,9 @@ def main() -> None:
         list_provider(prov)
 
     print(
+        "\n  Labels are heuristics from the NAME. No provider exposes its "
+        "free-tier\n  quota through this endpoint, so the only way to know "
+        "yours is to spend one:\n"
         "\nSet MODEL (Gemini) or GROQ_MODEL (Groq) in .env to a stable,\n"
         "versioned name from the list above. Then confirm the real daily cap\n"
         'with one cheap call:  python agent.py "hello"'

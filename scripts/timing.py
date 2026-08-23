@@ -64,6 +64,8 @@ def report(path: Path, trace: dict) -> None:
         ("generating", t.get("model_seconds", 0), "smaller prompt, fewer tools, THINKING_BUDGET=0"),
         ("waiting (rate limits)", t.get("wait_seconds", 0), "pin a provider, or come back later"),
         ("pacing (ours)", t.get("throttle_seconds", 0), "lower min_interval in providers.py"),
+        ("rejected requests", t.get("failed_seconds", 0),
+         "these are 429s bouncing — pin a provider or wait for quota"),
         ("tools", t.get("tool_seconds", 0), "index the database"),
         ("our own python", t.get("unaccounted_seconds", 0), "should be ~0"),
     ]
