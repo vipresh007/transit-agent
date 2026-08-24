@@ -344,3 +344,15 @@ footer {
 
 .tally .warnish { color: var(--warn); }
 .tally .dim { color: #4a5462; }
+
+/* ---- live vehicles --------------------------------------------------- */
+.livedot {
+  display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--good); margin-right: 7px; vertical-align: middle;
+  animation: livepulse 2s ease-in-out infinite;
+}
+@keyframes livepulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(52,211,153,.55); }
+  50%      { box-shadow: 0 0 0 7px rgba(52,211,153,0); }
+}
+.leaflet-interactive.live-dot { animation: livepulse 2s ease-in-out infinite; }

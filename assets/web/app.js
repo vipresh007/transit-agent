@@ -127,6 +127,10 @@ async function ask(question) {
 function render(data) {
   const box = $("result");
   box.hidden = false;
+  // Kill any poller from the previous answer before the DOM it wrote into is
+  // replaced. Otherwise every question leaves a timer behind, fetching for a
+  // map that no longer exists.
+  stopLive();
 
   if (data.error) {
     box.innerHTML = `<div class="banner"><strong>Couldn't structure an answer.</strong><br>${esc(data.error)}</div>`;
@@ -143,7 +147,8 @@ function render(data) {
   }
 
   html += `<div class="split"><div>${timeline(data)}</div><div><div id="map"></div>
-    <div class="tally" id="tally"></div>${
+    <div class="tally" id="tally"></div>
+    <div class="tally" id="live"></div>${
     data.map.unresolved.length
       ? `<div class="note">Not on the map: ${esc(data.map.unresolved.join(", "))}. ` +
         `Neighbourhood names aren't in the GTFS feed — stop names are intersections.</div>`
@@ -373,6 +378,84 @@ function buildMap(el, d) {
           `route geometry but no footpaths.</span>`
         : "");
   }
+
+  startLive(d);
+}
+
+/* ---- live vehicles ---------------------------------------------------- */
+/* Positions only. The feed also carries per-stop predictions, and we do not
+ * use them: its stop ids disagree with our database (59% of them collide by
+ * number while naming a different stop), so a delay would be attached to the
+ * wrong place and look exactly like a correct one. A dot on a map claims
+ * "a vehicle is here"; a time claims "you will catch this". Only one of those
+ * survives a 1% join. */
+
+let liveLayer = null;
+let liveTimer = null;
+
+function stopLive() {
+  if (liveTimer) clearInterval(liveTimer);
+  liveTimer = null;
+}
+
+function startLive(d) {
+  stopLive();
+  const routes = d.live_routes || [];
+  const note = document.getElementById("live");
+  if (!note) return;
+
+  if (!routes.length) {
+    // Say why rather than showing nothing. Every subway-only journey lands
+    // here, and silence would read as a broken feature.
+    note.innerHTML = `<span class="dim">No live vehicles: TTC's realtime ` +
+      `feed covers buses and streetcars, not the subway.</span>`;
+    return;
+  }
+
+  const tick = async () => {
+    let data;
+    try {
+      const url = "/api/vehicles?routes=" + encodeURIComponent(routes.join("|"));
+      data = await (await fetch(url)).json();
+    } catch {
+      data = { available: false };
+    }
+
+    if (liveLayer) { map.removeLayer(liveLayer); liveLayer = null; }
+
+    // "Couldn't reach the feed" and "nothing is running" must not render the
+    // same way. The first is our problem, the second is information.
+    if (!data.available) {
+      note.innerHTML = `<span class="warnish">Live positions unavailable</span> ` +
+        `<span class="dim">— the feed didn't answer. The itinerary above is ` +
+        `unaffected.</span>`;
+      return;
+    }
+
+    liveLayer = L.layerGroup().addTo(map);
+    for (const [label, vehicles] of Object.entries(data.routes || {})) {
+      for (const v of vehicles) {
+        L.circleMarker([v.lat, v.lon], {
+          radius: 5, weight: 2, color: "#0b1018",
+          fillColor: "#34d399", fillOpacity: 0.95, className: "live-dot",
+        }).addTo(liveLayer).bindPopup(
+          `${esc(label)} — live position` +
+          (v.bearing != null ? `<br>heading ${Math.round(v.bearing)}°` : ""));
+      }
+    }
+
+    note.innerHTML = data.count
+      ? `<span class="livedot"></span>${data.count} vehicle` +
+        `${data.count === 1 ? "" : "s"} on ${esc(routes.join(", "))} right now ` +
+        `<span class="dim">· positions only, not arrival predictions</span>`
+      : `<span class="dim">No vehicles running on ` +
+        `${esc(routes.join(", "))} right now.</span>`;
+  };
+
+  tick();
+  // The feed republishes about every 30s. Polling faster shows the same
+  // snapshot twice and is rude to a free public service.
+  liveTimer = setInterval(tick, 30000);
 }
 
 /* ---- saved runs ------------------------------------------------------ */

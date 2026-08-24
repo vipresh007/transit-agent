@@ -375,6 +375,7 @@ def result_to_dict(result, allow_network: bool = False) -> dict:
         "legs": [],
         "caveats": [],
         "map": {"points": [], "paths": [], "unresolved": []},
+        "live_routes": [],
         "viewport": None,
         "feasible": False,
         "summary": "",
@@ -412,7 +413,29 @@ def result_to_dict(result, allow_network: bool = False) -> dict:
     if itinerary.feasible:
         payload["map"] = map_layers(itinerary, allow_network=allow_network)
         payload["viewport"] = viewport(payload["map"]["points"])
+
+    # Which routes could carry live vehicles. Computed here, once, so the
+    # browser never has to guess: the real-time feed is surface-only, and a
+    # page that polled for subway vehicles would get an empty answer forever
+    # and have no way to tell that apart from "none running".
+    payload["live_routes"] = live_routes(itinerary)
     return payload
+
+
+def live_routes(itinerary) -> list[str]:
+    """Routes in this itinerary that the real-time feed actually covers.
+
+    GTFS-RT for TTC is buses and streetcars. No subway, no walking. Returning
+    an explicit list — rather than letting the front end try every leg — is
+    what lets the map say "no live data for Line 1" instead of showing an
+    empty result that looks like a quiet night.
+    """
+    if itinerary is None:
+        return []
+    return sorted({
+        leg.route for leg in itinerary.legs
+        if leg.route and leg.mode in ("bus", "streetcar")
+    })
 
 
 def has_shapes() -> bool:

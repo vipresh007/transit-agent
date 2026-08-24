@@ -15,6 +15,7 @@ WHAT THIS IS. Four endpoints and three static files:
     GET  /api/replay/{n}    a saved run as JSON — zero model requests
     POST /api/plan          start a run, returns an id
     GET  /api/stream/{id}   server-sent events: tool calls as they happen
+    GET  /api/vehicles      live TTC vehicle positions, surface routes only
 
 The agent still runs on a worker thread and publishes to a queue, exactly as
 before. What changed is who drains the queue: an SSE generator instead of a
@@ -42,7 +43,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from transit import paths
-from transit.core import llm, trace
+from transit.core import llm, realtime, trace
 from transit.pipeline import view
 from transit.pipeline.plan import plan, replay, replayable
 from transit.tools import memory
@@ -157,6 +158,29 @@ def replay_one(name: str, geocode: bool = False) -> dict:
         return view.result_to_dict(replay(match), allow_network=geocode)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/vehicles")
+def vehicles(routes: str = "") -> dict:
+    """Live vehicle positions for the given routes. Surface routes only.
+
+    `available` is not decoration. None from the fetcher means "we couldn't
+    reach the feed"; an empty dict means "nothing is running". A map that
+    renders those two the same way tells you it's a quiet night during an
+    outage, which is the failure this whole project keeps finding.
+
+    Never fails the request. Real-time is a garnish on a page that is already
+    correct without it.
+    """
+    wanted = [r for r in (routes or "").split("|") if r.strip()]
+    if not wanted:
+        return {"available": True, "routes": {}, "count": 0}
+
+    grouped = realtime.for_routes(wanted)
+    if grouped is None:
+        return {"available": False, "routes": {}, "count": 0}
+    return {"available": True, "routes": grouped,
+            "count": sum(len(v) for v in grouped.values())}
 
 
 @app.get("/api/status")
