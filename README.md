@@ -22,6 +22,14 @@ python scripts/load_shapes.py        # optional: real track geometry for the map
 python tests/run_all.py              # verify, free
 ```
 
+Or skip all of that and let the container build its own database:
+
+```bash
+docker build -t transit-agent .      # ~6 min, downloads the feed itself
+docker run --rm -p 8000:8000 --env-file .env \
+  -v "$PWD/traces:/app/traces:ro" transit-agent
+```
+
 Get a Gemini key at https://aistudio.google.com/apikey — no card needed.
 
 **Budget the free tier before you plan your day around it.** Gemini's free
@@ -76,15 +84,18 @@ changes. `python -m transit.pipeline.evals` spends quota; run it on purpose.
 agent.py  plan.py  crew.py  graph.py   three-line launchers, nothing else
 transit/
   paths.py      every file the project reads or writes, absolute
-  core/         agent, llm, providers, cache, trace, threadstate, embeddings
+  core/         agent, llm, providers, cache, trace, threadstate, embeddings,
+                realtime (GTFS-RT vehicle positions)
   tools/        geo, transit, journey, guides, memory, registry
-  verify/       constraints, grounding, schemas
-  pipeline/     plan, crew, graph, evals
+  verify/       constraints, grounding, schemas, gtfstime
+  pipeline/     plan, crew, graph, evals, view (all render logic, testable)
 serve.py        the web app  ->  http://127.0.0.1:8000
 ui.py           the earlier Streamlit front end (optional)
-transit/web/    FastAPI: 5 endpoints, SSE for live tool calls
+transit/web/    FastAPI: 6 endpoints, SSE for live tool calls
 assets/web/     index.html, app.css, app.js — hand-written, no build step
-scripts/        load_gtfs, load_shapes, load_guides, optimize_db, list_models, timing
+scripts/        load_gtfs, load_shapes, load_guides, optimize_db, list_models,
+                timing, probe_rt (does the realtime feed join to our data?)
+Dockerfile      two stages: build the database, then ship it
 data/           databases and downloads (gitignored)
 tests/
 ```
@@ -99,7 +110,7 @@ in `tools/` because the agent calls `remember`/`recall` as tools; in
 ## Tests
 
 ```bash
-python tests/run_all.py     # nine suites, offline, no API key, no quota
+python tests/run_all.py     # eleven suites, offline, no API key, no quota
 ```
 
 `_harness.py` stubs the OpenAI SDK before any project module loads, so the loop
@@ -114,14 +125,29 @@ an environment without langgraph while a broken import sat in it.
 
 `test_imports.py` is static and runs first. It exists because the package
 reorganisation left `journey.py` calling `paths.readonly_uri()` without
-importing `paths`. All eight other suites passed — the bug sat inside a
+importing `paths`. Every other suite at the time passed — the bug sat inside a
 function body on the one path they skip, since exercising it needs a 4.2M-row
 database. It surfaced as a live run that spent 36 requests inventing a midnight
 departure. **Behavioural tests only cover code they run, and the expensive
 paths are the ones they skip.**
 
+`test_realtime.py` decodes the protobuf feed bytes saved by `probe_rt.py`, so
+it exercises real data with no network. Its most useful checks assert what the
+code *won't* do: `Vehicle` has no time field and never will, and the module
+never decodes `stop_time_update`. See stage 11 for why.
+
+`test_docker.py` is static text analysis of the Dockerfile. A build takes six
+minutes to tell you a `COPY` path is wrong; this takes 0.2s. It also catches
+the two mistakes that are invisible in a build log — a secret that could enter
+a layer, and a `chown -R` after a `COPY`.
+
 Cost money, so excluded: `tests/smoke_test.py` (hits the free APIs) and
 `python -m transit.pipeline.evals` (~35 model requests).
+
+**Never run live: `crew.py`.** Its tests use a scripted fake model, so they
+prove the mechanics — decomposition, concurrent subagents, reassembly — and
+not that a real model decomposes sensibly. Three concurrent agents against a
+20-a-day quota is why.
 
 ## Stages
 
@@ -211,6 +237,51 @@ Verdict: checkpointing is real. Nothing else here would improve the agent, and
 the constraint checking, grounding and evals that make it trustworthy come from
 none of it. Port something you've hand-written if you want to judge a framework.
 
+**11 — real-time, and the number that killed most of it.** TTC publishes
+GTFS-RT free, no key: vehicle positions, trip updates, service alerts. Before
+building anything, `scripts/probe_rt.py` measured whether the feed joins to
+`transit.db`:
+
+| join | rate | verdict |
+|---|---|---|
+| `trip_id` | 0% | synthetic negative hashes — no fix exists |
+| `stop_id` | 59.3% | **1.1% real.** The rest are integer collisions |
+| `route_id` | 99.4% | genuine; 807/807 vehicles resolved |
+
+That 59.3% is the whole lesson. A set-membership test answers *is this string
+present*; it cannot answer *does this string mean the same thing*. Feed route
+23 is Dawes Rd, and its "matched" stops resolved to Bathurst St. Built on that
+join, every bus leg would show a live, precise, confidently wrong delay — and
+a wrong number looks exactly like a right one.
+
+So the feature is positions only. `Vehicle` has no time field, a test asserts
+it never will, and another greps the module to ensure `stop_time_update` is
+never decoded. "23 streetcars are on the 504, here is where they are" needs
+route + coordinates and cannot be wrong about a time it never states.
+
+The map reports per route, never summed: *11 on 510 · nothing running on 304*.
+A total hid the zero, and the zero was the useful half.
+
+**Containerising.** Two stages: build the database from the 34MB feed in a
+container that gets thrown away, copy out the one finished file. It is built
+rather than copied because 589MB doesn't belong in a build context, because
+copying would freeze one laptop's schedule into every image, and mostly
+because it proves the loaders run somewhere that isn't your machine.
+
+Three things it found, none of which any test or log would have shown:
+
+- `chown -R` after `COPY` **duplicated the 488MB database**. Overlay
+  filesystems can't change a lower layer's metadata in place, so touching a
+  file's owner copies the whole thing up — and layers are append-only. Use
+  `COPY --chown=` and create the user first. 1.45GB → 849MB.
+- The image never ran `ANALYZE`, so the container planned queries without
+  `sqlite_stat1` while the laptop had it. Nothing fails; it's just slower,
+  invisibly.
+- `load_gtfs.py` was building three indexes no query plan could reach —
+  each a strict prefix of a composite added later to fix a slow join.
+  **129MB, 22% of the database.** `EXPLAIN QUERY PLAN` confirmed all four
+  query shapes still use an index without them.
+
 ## Gotchas hit so far
 
 **`400 Function call is missing a thought_signature`** — Gemini signs its
@@ -271,6 +342,18 @@ imported `llm` (which reaches `providers`) before `agent` (which loaded
 with a clean terminal. `.env` now loads in `transit/__init__.py` — config that
 everything depends on can't be loaded by one of the things that depends on it.
 
+**A default that's wrong doesn't announce itself** — `leg_shape()` defaulted
+to `service_id="1"`, weekday service, so a leg on the 304 (all service 3) drew
+a straight line while 1,917 shape points sat unused in the table. Rails don't
+move on Sundays; filtering geometry by service day was never meaningful, only
+accidental. Third time here a default has posed as a fact.
+
+**Ask a tool to attribute a number to a cause** — `docker history` found
+490MB spent on one word, `scripts/timing.py` found 52s of rejected requests
+filed under "our own Python", and `probe_rt.py` found that a 59% match rate
+was 1% agreement. Each number looked fine until something made it explain
+itself.
+
 **Windows** — `.ps1` does nothing in `cmd.exe` (use `activate.bat`); PowerShell's
 `del` wants commas, not spaces; the Store Python alias can shadow the venv;
 `winget`-installed `ollama` needs a fresh shell.
@@ -283,6 +366,7 @@ everything depends on can't be loaded by one of the things that depends on it.
 | [Open-Meteo](https://open-meteo.com) | Weather | No |
 | [Overpass](https://overpass-api.de) | POIs, opening hours | No |
 | [TTC GTFS](https://open.toronto.ca/dataset/ttc-routes-and-schedules/) | Toronto schedules | No |
+| [TTC GTFS-RT](https://open.toronto.ca/dataset/ttc-bustime-real-time-next-vehicle-arrival-nvas/) | Live vehicle positions (surface only) | No |
 | [Transitland](https://www.transit.land) | Feeds for other cities | Free key |
 | [Wikivoyage dumps](https://dumps.wikimedia.org/enwikivoyage/) | RAG corpus | No |
 

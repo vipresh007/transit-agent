@@ -558,6 +558,38 @@ def test_the_cli_delegates_to_the_pipeline():
         check(f"_plan() does NOT call {name}() itself", name not in called)
 
 
+def test_a_finished_run_survives_an_unwritable_trace_dir():
+    section("the log is not the product")
+
+    import stat
+    import tempfile
+
+    from transit.core import trace as trace_module
+
+    # By the time trace.write() runs, the model requests are spent and the
+    # answer exists. Raising here throws away a finished result to report
+    # that we could not file the paperwork about it. Found by mounting
+    # traces/ read-only into the container: a correct itinerary reached the
+    # browser as "OSError: [Errno 30] Read-only file system".
+    original = trace_module.TRACE_DIR
+    with tempfile.TemporaryDirectory() as tmp:
+        locked = Path(tmp) / "locked"
+        locked.mkdir()
+        locked.chmod(stat.S_IRUSR | stat.S_IXUSR)          # r-x, no write
+        trace_module.TRACE_DIR = locked
+        try:
+            path = trace_module.write(
+                "a question", "an answer", provider="test", model="test",
+                usage={}, cache_stats={}, flags={})
+            check("write() returns instead of raising", path is not None)
+            check("and the file really wasn't written", not path.exists())
+        except OSError as exc:
+            check("write() did not raise OSError", False, f"raised {exc}")
+        finally:
+            trace_module.TRACE_DIR = original
+            locked.chmod(stat.S_IRWXU)
+
+
 if __name__ == "__main__":
     for fn in (test_observers_see_events_live,
                test_the_cli_delegates_to_the_pipeline,
@@ -573,7 +605,8 @@ if __name__ == "__main__":
                test_route_geometry,
                test_timeline_markup,
                test_stat_cards_show_severity,
-               test_json_for_the_browser):
+               test_json_for_the_browser,
+               test_a_finished_run_survives_an_unwritable_trace_dir):
         fn()
     from _harness import PASSED
     print(f"\n{PASSED['n']} checks passed")

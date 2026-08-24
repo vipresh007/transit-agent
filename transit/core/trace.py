@@ -10,6 +10,7 @@ traces/latest.json always points at the most recent run.
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -143,7 +144,10 @@ def write(
     wall_seconds: float | None = None,
     concurrent: bool = False,
 ) -> Path:
-    TRACE_DIR.mkdir(exist_ok=True)
+    try:
+        TRACE_DIR.mkdir(exist_ok=True)
+    except OSError:
+        pass          # the write below reports it; one message, not two
     payload = {
         "question": question,
         "when": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -162,6 +166,21 @@ def write(
     }
     blob = json.dumps(payload, indent=2, default=str)
     path = TRACE_DIR / f"{time.strftime('%Y%m%d-%H%M%S')}.json"
-    path.write_text(blob, encoding="utf-8")
-    (TRACE_DIR / "latest.json").write_text(blob, encoding="utf-8")
+    try:
+        path.write_text(blob, encoding="utf-8")
+        (TRACE_DIR / "latest.json").write_text(blob, encoding="utf-8")
+    except OSError as exc:
+        # THE LOG IS NOT THE PRODUCT. By the time this runs the model requests
+        # are spent and the answer exists; throwing here destroys a finished
+        # result to report that we couldn't file the paperwork about it.
+        #
+        # Found by mounting traces/ read-only into the container. The run
+        # completed, the itinerary was correct, and the browser showed
+        # "OSError: [Errno 30] Read-only file system" — twenty-odd requests
+        # off a twenty-a-day quota, thrown away by the logging.
+        #
+        # Loud, because a silently missing trace is the other failure: replay
+        # is how this project inspects runs without paying for them again.
+        print(f"  (could not save the trace: {exc})", file=sys.stderr)
+        return path
     return path
