@@ -58,10 +58,23 @@ def main() -> None:
         conn.execute(sql)
         print(f" {time.time() - t0:.0f}s")
 
+    # ANALYZE writes sqlite_stat1: how selective each index actually is.
+    # Without it the planner guesses, and the plan_journey self-join over
+    # 4.2M rows is precisely where a wrong guess costs seconds. Nothing
+    # fails — it just runs slowly, which no log will ever tell you.
     print("  ANALYZE...", end="", flush=True)
     t0 = time.time()
     conn.execute("ANALYZE")
     conn.commit()
+    print(f" {time.time() - t0:.0f}s")
+
+    # Building and dropping indexes leaves free pages scattered through the
+    # file. SQLite reuses them but never returns them to the filesystem, so
+    # the database stays as large as its high-water mark. VACUUM rewrites it
+    # compactly. Needs temporary space equal to the database size.
+    print("  VACUUM...", end="", flush=True)
+    t0 = time.time()
+    conn.execute("VACUUM")
     print(f" {time.time() - t0:.0f}s")
     conn.close()
 

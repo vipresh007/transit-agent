@@ -150,6 +150,57 @@ def test_the_database_is_built_not_shipped():
           "load_gtfs.py" not in final)
 
 
+def test_nothing_is_chowned_after_it_is_copied():
+    section("no accidental second copy")
+
+    # `chown -R` over a path holding files from an earlier layer copies every
+    # one of them into the new layer. Overlay filesystems cannot change a
+    # lower layer's metadata in place, so the file is duplicated — and layers
+    # are append-only, so the original is unreclaimable.
+    #
+    # This cost 490MB: the 488MB database ended up in the image twice,
+    # reported by `docker history` as a suspiciously large `useradd` line.
+    # Nothing fails, nothing warns, and the build log looks perfect.
+    #
+    # TWO THINGS THIS CHECK GOT WRONG FIRST TIME, both worth keeping in view:
+    #
+    #   1. It read comments. The paragraph you are reading contains the
+    #      offending string, so the detector flagged its own explanation.
+    #      Second time that has happened in this test suite.
+    #   2. It ignored build stages. Stage one COPYs before stage two chowns,
+    #      so the correct, deliberate chown-before-any-copy in the final stage
+    #      looked like the bug it exists to prevent.
+    #
+    # Both are the same failure the project keeps meeting from the other side:
+    # a checker that demands one shape fires on a correct answer written in
+    # another. Compare per stage, and read instructions rather than prose.
+    text = DOCKERFILE.read_text("utf-8")
+    code = [l.strip() for l in text.splitlines()
+            if l.strip() and not l.strip().startswith("#")]
+
+    stages: list = []
+    for line in code:
+        if line.upper().startswith("FROM"):
+            stages.append([])
+        if stages:
+            stages[-1].append(line)
+
+    for number, stage in enumerate(stages, 1):
+        first_copy = next((i for i, l in enumerate(stage)
+                           if l.startswith("COPY")), len(stage))
+        late = [l for l in stage[first_copy:] if re.search(r"\bchown\s+-R\b", l)]
+        check(f"stage {number}: no recursive chown after a COPY", not late,
+              True if not late else f"found: {late}")
+
+    # The safe form: ownership set as the file is written, one copy only.
+    # Stage one is exempt — nothing survives it but the one file stage two
+    # copies out, so ownership there is irrelevant.
+    for line in stages[-1] if stages else []:
+        if line.startswith("COPY"):
+            check(f"{line.split('#')[0].strip()[:50]} sets --chown",
+                  "--chown=" in line)
+
+
 def test_it_does_not_run_as_root():
     section("privileges")
 
@@ -165,6 +216,7 @@ if __name__ == "__main__":
                test_every_copy_source_exists,
                test_the_port_is_reachable,
                test_healthcheck_is_wellformed,
+               test_nothing_is_chowned_after_it_is_copied,
                test_the_database_is_built_not_shipped,
                test_it_does_not_run_as_root):
         fn()

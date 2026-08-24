@@ -43,12 +43,24 @@ RUN pip install --no-cache-dir requests
 # Only what the loaders import. Copying the whole repo would invalidate this
 # very expensive layer every time a CSS file changed.
 COPY transit/__init__.py transit/paths.py transit/
-COPY scripts/load_gtfs.py scripts/load_shapes.py scripts/__init__.py scripts/
+COPY scripts/load_gtfs.py scripts/load_shapes.py scripts/optimize_db.py \
+     scripts/__init__.py scripts/
 
-# Fetches the current zip from Toronto's open data portal, builds the tables
-# and indexes, then loads 415k shape points for the map. Roughly 3-6 minutes
-# and about 500MB of disk in this throwaway stage.
-RUN python scripts/load_gtfs.py && python scripts/load_shapes.py
+# Fetch the zip, build tables and indexes, load 415k shape points, then
+# ANALYZE and VACUUM. Roughly 4-7 minutes.
+#
+# The ANALYZE is not optional polish. It writes sqlite_stat1, which is how
+# the query planner knows one index is selective and another isn't. Without
+# it the planner guesses, and plan_journey's self-join over 4.2M rows is the
+# query where a wrong guess costs seconds. The first version of this
+# Dockerfile skipped it, so the container was quietly slower than the laptop
+# with no way to see that from a build log.
+#
+# One RUN, not three: each RUN is a layer, and the intermediate database
+# states would each be frozen into one.
+RUN python scripts/load_gtfs.py \
+ && python scripts/load_shapes.py \
+ && python scripts/optimize_db.py
 
 # --------------------------------------------------------------------------
 # Stage 2: the actual image
@@ -75,23 +87,40 @@ RUN pip install --no-cache-dir \
         "openai>=1.60.0" "python-dotenv>=1.0.1" "requests>=2.32.0" \
         "pydantic>=2.9.0" fastapi uvicorn
 
-COPY transit/ transit/
-COPY assets/ assets/
-COPY scripts/ scripts/
-COPY serve.py agent.py plan.py crew.py ./
-
-# The one artefact worth carrying out of stage one.
-COPY --from=data /build/data/transit.db /app/data/transit.db
-
-# Writable at runtime, empty at start. memory.db and graph.db land here and
-# do NOT survive the container — there is no volume. The app should say so
-# rather than quietly forgetting a preference.
-RUN mkdir -p /app/traces /app/.cache
-
-# Run as a non-root user. If something in this app can be talked into writing
-# a file it shouldn't, doing it as uid 0 makes a small problem a large one.
+# THE USER IS CREATED BEFORE ANYTHING IS COPIED, and every COPY sets its own
+# ownership. This is not style.
+#
+# The first version did the obvious thing — copy everything, then
+# `RUN chown -R transit:transit /app` at the end — and it added 490MB to a
+# 1.45GB image. `chown` modifies file metadata, and in an overlay filesystem
+# modifying ANY attribute of a file from a lower layer copies the whole file
+# up into the new one. The 488MB database was therefore in the image twice:
+# once as copied, once as re-owned. Layers are append-only, so the first copy
+# can never be reclaimed.
+#
+# `docker history` showed it as a 490MB `useradd` line, which is a strange
+# enough thing to see that it's worth knowing why: the size belongs to the
+# chown, not the user.
+#
+# Run as non-root because if this app can ever be talked into writing a file
+# it shouldn't, doing that as uid 0 turns a small problem into a large one.
 RUN useradd --create-home --uid 10001 transit \
+ && mkdir -p /app/data /app/traces /app/.cache \
  && chown -R transit:transit /app
+
+COPY --chown=transit:transit transit/ transit/
+COPY --chown=transit:transit assets/ assets/
+COPY --chown=transit:transit scripts/ scripts/
+COPY --chown=transit:transit serve.py agent.py plan.py crew.py ./
+
+# The one artefact worth carrying out of stage one. --chown here rather than
+# afterwards is the whole point: written once, owned correctly on arrival.
+COPY --from=data --chown=transit:transit \
+     /build/data/transit.db /app/data/transit.db
+
+# /app/traces and /app/.cache are writable but empty. memory.db and graph.db
+# land there and do NOT survive the container — there is no volume. The app
+# should say so rather than quietly forgetting a preference.
 USER transit
 
 EXPOSE 8000
