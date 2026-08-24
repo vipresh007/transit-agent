@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import queue
 import threading
 import uuid
@@ -216,6 +217,18 @@ def main() -> None:
     if not ASSETS.exists():
         sys.exit(f"Missing {ASSETS} — the front end files aren't there.")
 
-    print("  Toronto Transit Agent  ->  http://127.0.0.1:8000")
+    # Loopback by default: running a dev server on 0.0.0.0 exposes it to
+    # everything on the coffee-shop wifi, and nothing here expects a stranger.
+    #
+    # In a container that default is wrong in the opposite direction —
+    # 127.0.0.1 inside a network namespace is reachable only from inside the
+    # container, so `docker run -p 8000:8000` maps a port that never answers
+    # and the app looks hung rather than misconfigured. Hence the env var,
+    # which the Dockerfile sets and a laptop doesn't.
+    host = os.getenv("HOST", "127.0.0.1")
+    port = int(os.getenv("PORT", "8000"))
+
+    shown = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
+    print(f"  Toronto Transit Agent  ->  http://{shown}:{port}")
     print("  Saved runs replay for free; asking costs model requests.\n")
-    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="warning")
+    uvicorn.run(app, host=host, port=port, log_level="warning")

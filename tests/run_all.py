@@ -2,7 +2,7 @@
 
     python tests/run_all.py
 
-Eleven suites:
+Twelve suites:
     test_imports   static: do all imports resolve, no dangling references
     test_tools     tool logic + SQL against transit.db
     test_agent     loop mechanics with a scripted fake model
@@ -13,6 +13,8 @@ Eleven suites:
     test_streaming live observers + the plan()/UI split
     test_realtime  GTFS-RT decoding against saved bytes, and the predictions
                    we deliberately refuse to make
+    test_docker    static audit of the image build: no secret can enter a
+                   layer, every COPY path resolves, the port is reachable
     test_graph     the LangGraph port — skips if langgraph isn't installed
     evals          --selftest, i.e. do the eval checkers themselves work
 
@@ -39,6 +41,7 @@ SUITES = [
     ("crew", [sys.executable, str(HERE / "test_crew.py")], HERE),
     ("streaming/UI", [sys.executable, str(HERE / "test_streaming.py")], HERE),
     ("realtime", [sys.executable, str(HERE / "test_realtime.py")], HERE),
+    ("container", [sys.executable, str(HERE / "test_docker.py")], HERE),
     ("langgraph port", [sys.executable, str(HERE / "test_graph.py")], HERE),
     ("eval checkers", [sys.executable, "-m", "transit.pipeline.evals", "--selftest"], ROOT),
 ]

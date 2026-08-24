@@ -444,12 +444,26 @@ function startLive(d) {
       }
     }
 
-    note.innerHTML = data.count
-      ? `<span class="livedot"></span>${data.count} vehicle` +
-        `${data.count === 1 ? "" : "s"} on ${esc(routes.join(", "))} right now ` +
-        `<span class="dim">· positions only, not arrival predictions</span>`
-      : `<span class="dim">No vehicles running on ` +
-        `${esc(routes.join(", "))} right now.</span>`;
+    // Per route, never summed. "11 vehicles on 304, 510" is eleven on the
+    // 510 and none at all on the 304, and the zero is the more useful fact
+    // of the two — it's the leg you can't board. A total hides exactly the
+    // number a reader needs.
+    const counts = routes.map((r) => [r, (data.routes?.[r] || []).length]);
+    const running = counts.filter(([, n]) => n > 0);
+    const idle = counts.filter(([, n]) => n === 0).map(([r]) => r);
+
+    const parts = [];
+    if (running.length) {
+      parts.push(`<span class="livedot"></span>` +
+        running.map(([r, n]) => `<b>${n}</b> on ${esc(r)}`).join(" · ") +
+        ` right now`);
+    }
+    if (idle.length) {
+      parts.push(`<span class="${running.length ? "dim" : "warnish"}">` +
+        `nothing running on ${esc(idle.join(", "))}</span>`);
+    }
+    note.innerHTML = parts.join(" · ") +
+      ` <span class="dim">· positions only, not arrival predictions</span>`;
   };
 
   tick();

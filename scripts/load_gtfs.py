@@ -51,17 +51,30 @@ WANTED = [
     "calendar_dates.txt",
 ]
 
+# Composite covering indexes for the journey planner's self-join on
+# stop_times (find all stops downstream of X on the same trip). Without them
+# each interchange search costs ~0.5s and a full journey search took 17s.
+#
+# THERE USED TO BE THREE MORE, and they were pure cost:
+#
+#     ix_stop_times_trip(trip_id)   prefix of ix_st_trip_seq          71.7 MB
+#     ix_stop_times_stop(stop_id)   prefix of ix_st_stop_trip         55.7 MB
+#     ix_trips_service(service_id)  prefix of ix_trips_service_route   1.3 MB
+#
+# SQLite uses a composite index for any query that filters on a leading
+# subset of its columns, so a single-column index on the first column of one
+# you already have can never be chosen. 129 MB — 22% of the database — spent
+# on three indexes that no query plan could reach. They were added first, the
+# composites were added later to fix a slow join, and nobody went back.
+#
+# Existing databases keep them until rebuilt. To reclaim the space in place:
+#     sqlite3 data/transit.db "DROP INDEX ix_stop_times_trip;
+#       DROP INDEX ix_stop_times_stop; DROP INDEX ix_trips_service; VACUUM;"
 INDEXES = [
-    "CREATE INDEX IF NOT EXISTS ix_stop_times_stop ON stop_times(stop_id)",
-    "CREATE INDEX IF NOT EXISTS ix_stop_times_trip ON stop_times(trip_id)",
-    # Composite covering indexes for the journey planner's self-join on
-    # stop_times (find all stops downstream of X on the same trip). With only
-    # the single-column indexes above, each interchange search costs ~0.5s and
-    # a full journey search took 17 seconds.
     "CREATE INDEX IF NOT EXISTS ix_st_trip_seq ON stop_times(trip_id, stop_sequence, stop_id)",
     "CREATE INDEX IF NOT EXISTS ix_st_stop_trip ON stop_times(stop_id, trip_id, stop_sequence)",
     "CREATE INDEX IF NOT EXISTS ix_trips_route ON trips(route_id)",
-    "CREATE INDEX IF NOT EXISTS ix_trips_service ON trips(service_id)",
+    "CREATE INDEX IF NOT EXISTS ix_trips_service_route ON trips(service_id, route_id, trip_id)",
     "CREATE INDEX IF NOT EXISTS ix_stops_name ON stops(stop_name)",
 ]
 

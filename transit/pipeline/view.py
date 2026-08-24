@@ -452,8 +452,24 @@ def has_shapes() -> bool:
 
 
 def leg_shape(route: str, origin: str, destination: str,
-              service_id: str = "1") -> list[list[float]] | None:
+              service_id: str | None = None) -> list[list[float]] | None:
     """The real track between two stops, as [[lon, lat], ...].
+
+    NOTE ON service_id. This used to default to "1" — weekday service — and
+    that default silently blanked the map for any leg running on another
+    schedule. A Kensington-to-Distillery run drew the 510 and lost the 304,
+    whose trips are all service_id 3; the route has 1,917 shape points sitting
+    right there in the table. The geometry was never missing, we just asked
+    for the wrong day.
+
+    Rails do not move between Sunday and Tuesday. Filtering geometry by
+    service was never meaningful, only accidental, so the default is now None:
+    any trip on this route that serves both stops in order describes the same
+    physical track. Pass a service_id only if you specifically want one.
+
+    Third time a default has posed as a fact in this project, after the
+    hardcoded "1" in the departure checks and the assumption that route_id
+    equals route_short_name.
 
     Sliced by shape_dist_traveled — the distance along the route recorded
     against both the shape points and the stop times. That makes it a range
@@ -505,7 +521,7 @@ def leg_shape(route: str, origin: str, destination: str,
             JOIN stops sa      ON sa.stop_id = a.stop_id
             JOIN stops sb      ON sb.stop_id = b.stop_id
             WHERE r.route_short_name = ?
-              AND t.service_id = ?
+              AND (? IS NULL OR t.service_id = ?)
               AND (sa.stop_id = ? OR sa.stop_name LIKE ?)
               AND (sb.stop_id = ? OR sb.stop_name LIKE ?)
               AND CAST(b.stop_sequence AS INTEGER) > CAST(a.stop_sequence AS INTEGER)
@@ -514,7 +530,7 @@ def leg_shape(route: str, origin: str, destination: str,
               AND a.shape_dist_traveled != '' AND b.shape_dist_traveled != ''
             LIMIT 1
             """,
-            (route, service_id,
+            (route, service_id, service_id,
              id_a or "", f"%{name_a}%",
              id_b or "", f"%{name_b}%"),
         ).fetchone()

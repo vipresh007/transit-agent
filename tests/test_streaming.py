@@ -367,6 +367,21 @@ def test_route_geometry():
     check("the line starts at the boarding stop",
           abs(first_lat - start[0]) < 0.002 and abs(first_lon - start[1]) < 0.002)
 
+    # Geometry must not depend on which service day the leg falls on. This
+    # defaulted to service_id "1" and so drew nothing for the 304, whose trips
+    # are all service 3 — the map showed one line of a two-line journey while
+    # 1,917 shape points sat unused. Rails don't move on Sundays.
+    night = view.leg_shape("304", "King St West at Spadina Ave East Side",
+                           "Distillery Loop")
+    check("a leg on a non-weekday service still gets geometry",
+          night is not None and len(night) > 2)
+    check("it is still real track, not a straight line",
+          night is not None and len(night) > 10)
+    # ...but asking for one service explicitly must still mean that service.
+    check("an explicit service_id still filters",
+          view.leg_shape("304", "King St West at Spadina Ave East Side",
+                         "Distillery Loop", service_id="1") is None)
+
     check("a route that doesn't serve those stops has no shape",
           view.leg_shape("504", "Spadina Ave at Nassau St South Side",
                          "Spadina Ave at King St West"), None)

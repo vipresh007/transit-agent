@@ -1,0 +1,57 @@
+# What must never enter an image layer.
+#
+# Docker layers are append-only. A file copied in one layer and deleted in a
+# later one is still sitting in the first layer, readable by anyone with the
+# image — `docker history` and `docker save` both hand it over. There is no
+# "remove it later"; there is only "never copy it".
+#
+# So this file is the actual security boundary for the build, not the
+# RUN rm -rf you might be tempted to write further down a Dockerfile.
+
+# ---- secrets -------------------------------------------------------------
+.env
+.env.*
+*.pem
+*.key
+
+# ---- generated data ------------------------------------------------------
+# transit.db is 589MB and gets BUILT inside the image from the GTFS zip.
+# Copying the local one in would bloat the image and, worse, freeze whatever
+# schedule happened to be on this laptop into every container.
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Runs and caches. traces/ holds real questions asked on this machine and
+# .cache/ holds recorded model responses; neither belongs in a shipped image.
+traces/
+.cache/
+
+# ---- local environment ---------------------------------------------------
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- vcs and editor ------------------------------------------------------
+# .git can be large and contains every version of everything ever committed.
+.git/
+.gitignore
+.github/
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# ---- docs and tests ------------------------------------------------------
+# The image runs the app; it does not need the prose. Tests stay out too —
+# they'd pull the dev dependencies in behind them.
+*.md
+!README.md
+Dockerfile
+.dockerignore
