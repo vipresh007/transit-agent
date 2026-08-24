@@ -311,6 +311,18 @@ def test_map_geometry():
     check("neighbourhood names are named, not dropped",
           layers["unresolved"], ["Kensington Market"])
 
+    # A paraphrased platform name still gets a pin. The model wrote
+    # "Yorkdale Station (northbound platform)" where the feed says
+    # "Yorkdale Station - Northbound Platform"; the two platforms are metres
+    # apart so for a MAP either is right. This fallback is deliberately
+    # absent from the departure check — approximating which side of a
+    # platform to draw a dot on is cartography, approximating which platform
+    # a train leaves from is a claim someone acts on.
+    check("a paraphrased platform still resolves for the map",
+          view.locate("Yorkdale Station (northbound platform)") is not None)
+    check("but an invented stop does not",
+          view.locate("Line 1 subway platform (northbound)"), None)
+
     camera = view.viewport(layers["points"])
     check("the viewport centres on Toronto",
           43.4 < camera["latitude"] < 44.0 and -79.8 < camera["longitude"] < -79.0)

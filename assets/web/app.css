@@ -341,3 +341,6 @@ footer {
   backdrop-filter: blur(8px); box-shadow: 0 4px 14px -4px #000;
 }
 .basemap-toggle:hover { background: rgba(11, 16, 24, .96); }
+
+.tally .warnish { color: var(--warn); }
+.tally .dim { color: #4a5462; }

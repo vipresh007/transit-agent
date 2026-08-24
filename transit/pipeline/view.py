@@ -123,6 +123,23 @@ def locate(label: str, allow_network: bool = False) -> tuple[float, float] | Non
         finally:
             conn.close()
 
+    if found is None and "(" in label:
+        # Drop a trailing qualifier and try the bare name: "Yorkdale Station
+        # (northbound platform)" -> "Yorkdale Station". The two platforms are
+        # metres apart, so for a MAP either is right.
+        #
+        # Deliberately here and NOT in the departure check. Approximating
+        # which side of a platform to draw a dot on is cartography;
+        # approximating which platform a train leaves from is a claim someone
+        # would act on. Same asymmetry as shapes versus times.
+        bare = label.split("(")[0].strip()
+        if bare and paths.TRANSIT_DB.exists():
+            conn = sqlite3.connect(paths.readonly_uri(paths.TRANSIT_DB), uri=True)
+            try:
+                found = constraints._stop_coords(conn, bare)
+            finally:
+                conn.close()
+
     if found is None and allow_network:
         try:
             payload = json.loads(geo.geocode(f"{label}, Toronto"))

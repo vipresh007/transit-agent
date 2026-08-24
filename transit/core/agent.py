@@ -128,6 +128,18 @@ Every attempt at that produced empty results that were then misread as "no
 service". find_direct_trips and query_transit exist for follow-ups
 plan_journey doesn't cover — not as a substitute for it.
 
+COPY STOP NAMES EXACTLY as the tool returned them, character for character.
+Do not tidy, shorten or reword them. A real run produced:
+
+    you wrote                                the feed says
+    "Yorkdale Station (northbound platform)" "Yorkdale Station - Northbound Platform"
+    "Line 1 subway platform (northbound)"    (no such stop — invented)
+
+Both look right and neither exists. Everything downstream matches on the
+name: the schedule verifier reported a false violation on a correct leg, and
+the map drew nothing. Include the stop_id when you have one, in the form the
+tool gave it.
+
 A stop_id is ONE PLATFORM serving ONE direction. College St at Augusta Ave
 is stop 809 eastbound and stop 12338 westbound. Check the 'serves' headsigns
 from find_nearby_stops to pick the platform pointing your way — querying the

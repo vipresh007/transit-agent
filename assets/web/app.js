@@ -356,11 +356,22 @@ function buildMap(el, d) {
     // believe the route runs where it doesn't.
     const exact = d.map.paths.filter((p) => p.exact).length;
     const approx = d.map.paths.filter((p) => !p.exact && p.mode !== "walk").length;
-    tally.textContent =
+    const walks = d.map.paths.filter((p) => p.mode === "walk").length;
+
+    tally.innerHTML =
       `${d.map.points.length} stops · ${drawn} legs` +
       (exact ? ` · ${exact} on real track` : "") +
-      (approx ? ` · ${approx} approximate` : "") +
-      (d.map.unresolved.length ? ` · ${d.map.unresolved.length} unplaced` : "");
+      (approx ? ` · <span class="warnish">${approx} approximate</span>` : "") +
+      (d.map.unresolved.length
+        ? ` · <span class="warnish">${d.map.unresolved.length} unplaced</span>` : "") +
+      // Say WHY the dashed lines are straight. Otherwise it reads as a bug,
+      // and the reader spends attention on a deliberate choice. Transit
+      // geometry comes from shapes.txt; GTFS has no pedestrian network at
+      // all, so there is nothing to draw a sidewalk from.
+      (walks
+        ? `<br><span class="dim">Dashed walks are straight lines — GTFS has ` +
+          `route geometry but no footpaths.</span>`
+        : "");
   }
 }
 
