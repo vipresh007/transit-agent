@@ -2,9 +2,10 @@
 
     python tests/run_all.py
 
-Twelve suites:
+Thirteen suites:
     test_imports   static: do all imports resolve, no dangling references
     test_tools     tool logic + SQL against transit.db
+    test_raptor    the journey planner: every leg checked against the feed
     test_agent     loop mechanics with a scripted fake model
     test_grounding whether an answer's specifics trace to its sources
     test_constraints whether an itinerary is actually possible
@@ -34,6 +35,7 @@ SUITES = [
     # every behavioural suite below would sail past.
     ("imports", [sys.executable, str(HERE / "test_imports.py")], HERE),
     ("tool logic", [sys.executable, str(HERE / "test_tools.py")], HERE),
+    ("raptor", [sys.executable, str(HERE / "test_raptor.py")], HERE),
     ("agent loop", [sys.executable, str(HERE / "test_agent.py")], HERE),
     ("grounding", [sys.executable, str(HERE / "test_grounding.py")], HERE),
     ("constraints", [sys.executable, str(HERE / "test_constraints.py")], HERE),

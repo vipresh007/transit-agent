@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)  # tools resolve transit.db relative to the working directory
 
 from transit import tools                                      # noqa: E402
-from transit.tools.journey import _shift, _with_walks     # noqa: E402
+from transit.tools.journey import _leg_dicts               # noqa: E402
 from transit import paths
 
 HAS_DB = paths.TRANSIT_DB.exists()
@@ -48,43 +48,66 @@ def test_registry():
 def test_time_arithmetic():
     section("GTFS time arithmetic")
 
-    check("shifts backwards", _shift("08:03:31", -3), "08:00:31")
-    check("keeps 24+ notation", _shift("25:23:00", 2), "25:25:00")
-    check("crosses midnight upward", _shift("23:59:00", 2), "24:01:00")
+    from transit.tools import raptor
+    S, C = raptor._secs, raptor.civil
+
+    check("round-trips a normal time", C(S("08:03:31")), "08:03:31")
+    # GTFS runs past 24:00 for after-midnight service, and collapsing that to
+    # 01:00 would file a Saturday-night trip on Saturday morning.
+    check("keeps 24+ notation", C(S("25:23:00")), "25:23:00")
+    check("crosses midnight upward", C(S("23:59:00") + 120), "24:01:00")
+    check("shifts backwards", C(S("08:03:31") - 180), "08:00:31")
     # A 00:02 departure minus a 5-minute walk produced '-1:57:00', which is
-    # not a time and fails schema validation.
+    # not a time and fails schema validation. The lesson moved from _shift()
+    # to civil() when RAPTOR replaced the pairwise search — the code went
+    # away, the 00:02 departure did not.
     check("clamps at zero rather than going negative",
-          _shift("00:02:00", -5), "00:00:00")
+          C(S("00:02:00") - 300), "00:00:00")
 
 
 def test_leg_labelling():
     section("journey leg labelling")
 
-    option = {
-        "type": "one_transfer",
-        "legs": [
-            {"route": "510", "headsign": "South", "from": "Spadina/Nassau",
-             "from_stop": "8128", "to": "Spadina/King", "to_stop": "8126",
-             "depart": "08:03:31", "arrive": "08:11:47"},
-            {"route": "504", "headsign": "East", "from": "King/Spadina",
-             "from_stop": "15648", "to": "Distillery Loop", "to_stop": "15462",
-             "depart": "08:15:22", "arrive": "08:37:00"},
-        ],
-        "transfer_walk_m": 73, "transfer_walk_min": 2,
-        "walk_to_stop_m": 257, "walk_from_stop_m": 200,
-    }
-    out = _with_walks(dict(option), "Kensington Market", "Distillery District")
-    legs = out["legs"]
+    # Same guarantee as before RAPTOR replaced the pairwise search: the model
+    # must never be handed bare distances and left to write the labels. It
+    # produced a final leg reading "Distillery Loop -> Kensington Market".
+    # Only the producer changed, so the test follows it rather than retiring
+    # with the old code — a test deleted alongside its subject takes the
+    # lesson with it.
+    from types import SimpleNamespace
 
-    # The model was left to infer walk endpoints and produced a final leg
-    # reading "Distillery Loop -> Kensington Market".
-    check("walk legs are inserted at both ends and the transfer", len(legs), 5)
-    check("first leg starts at the user's origin", legs[0]["from"], "Kensington Market")
-    check("last leg ends at the user's destination", legs[-1]["to"], "Distillery District")
+    from transit.tools import raptor
 
-    prev = None
-    ordered = True
-    for leg in legs:
+    tt = SimpleNamespace(
+        stop_ids=["8128", "8126", "15648", "15462"],
+        stop_names=["Spadina/Nassau", "Spadina/King",
+                    "King/Spadina", "Distillery Loop"],
+        stop_pos=[(43.655, -79.401), (43.645, -79.396),
+                  (43.645, -79.395), (43.650, -79.359)],
+    )
+    legs = [
+        raptor.Leg("ride", "510", 0, 1, raptor._secs("08:03:31"),
+                   raptor._secs("08:11:47"), "Union Station"),
+        raptor.Leg("walk", None, 1, 2, raptor._secs("08:11:47"),
+                   raptor._secs("08:13:47")),
+        raptor.Leg("ride", "504", 2, 3, raptor._secs("08:15:22"),
+                   raptor._secs("08:37:00"), "Distillery Loop"),
+    ]
+    out = _leg_dicts(tt, legs, "Kensington Market", "Distillery District",
+                     257, 200)
+
+    check("walk legs at both ends plus the transfer", len(out), 5)
+    check("first leg starts at the user's origin",
+          out[0]["from"], "Kensington Market")
+    check("last leg ends at the user's destination",
+          out[-1]["to"], "Distillery District")
+    check("every ride carries a headsign",
+          all(l.get("headsign") for l in out if l["mode"] == "transit"))
+    check("no leg leaves the traveller unaccounted for",
+          all(a["to"] == b["from"] for a, b in zip(out, out[1:])))
+
+    prev, ordered = None, True
+    for leg in out:
         if leg["arrive"] < leg["depart"] or (prev and leg["depart"] < prev):
             ordered = False
         prev = leg["arrive"]

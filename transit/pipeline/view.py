@@ -512,8 +512,15 @@ def leg_shape(route: str, origin: str, destination: str,
             -- Exactly the trap the zero-padded departure times set, one
             -- column over. Numeric-looking TEXT is still TEXT.
             SELECT t.shape_id,
-                   CAST(a.shape_dist_traveled AS REAL),
-                   CAST(b.shape_dist_traveled AS REAL)
+                   -- Empty at the FIRST stop of a trip means zero: the start
+                   -- of the shape. Everywhere else empty means unknown, and
+                   -- treating that as zero would draw the leg from the
+                   -- beginning of the route. So the distinction is made here
+                   -- rather than by a blanket COALESCE.
+                   CASE WHEN a.shape_dist_traveled = ''
+                        THEN 0.0 ELSE CAST(a.shape_dist_traveled AS REAL) END,
+                   CAST(b.shape_dist_traveled AS REAL),
+                   CAST(a.stop_sequence AS INTEGER)
             FROM trips t
             JOIN routes r      ON r.route_id = t.route_id
             JOIN stop_times a  ON a.trip_id = t.trip_id
@@ -526,8 +533,15 @@ def leg_shape(route: str, origin: str, destination: str,
               AND (sb.stop_id = ? OR sb.stop_name LIKE ?)
               AND CAST(b.stop_sequence AS INTEGER) > CAST(a.stop_sequence AS INTEGER)
               AND t.shape_id IS NOT NULL AND t.shape_id != ''
-              -- The first stop of a trip has an empty distance, not a zero.
-              AND a.shape_dist_traveled != '' AND b.shape_dist_traveled != ''
+              -- An empty origin distance is only meaningful at stop 1, where
+              -- it is zero. This used to exclude it outright, which blanked
+              -- the geometry for every leg BOARDING AT A TERMINUS — the 129
+              -- from Kennedy Station drew a straight line across Scarborough
+              -- while its 580-point shape sat in the table.
+              AND (a.shape_dist_traveled != ''
+                   OR CAST(a.stop_sequence AS INTEGER) = 1)
+              AND b.shape_dist_traveled != ''
+            ORDER BY CAST(a.stop_sequence AS INTEGER)
             LIMIT 1
             """,
             (route, service_id, service_id,
@@ -537,7 +551,7 @@ def leg_shape(route: str, origin: str, destination: str,
         if not row:
             return None
 
-        shape_id, start, end = row
+        shape_id, start, end, _sequence = row
         if start is None or end is None:
             return None
 

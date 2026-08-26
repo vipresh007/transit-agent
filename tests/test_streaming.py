@@ -377,6 +377,17 @@ def test_route_geometry():
           night is not None and len(night) > 2)
     check("it is still real track, not a straight line",
           night is not None and len(night) > 10)
+    # A leg BOARDING AT A TERMINUS has an empty shape_dist_traveled at its
+    # first stop, because GTFS records distance travelled and at stop 1 none
+    # has been. Excluding empty outright blanked the geometry for every such
+    # leg: the 129 from Kennedy Station drew a straight line across
+    # Scarborough with a 580-point shape sitting unused. Empty means zero
+    # HERE and unknown everywhere else, which is why it isn't a COALESCE.
+    terminus = view.leg_shape("129", "Kennedy Station - Platform B",
+                              "Scarborough Centre Station")
+    check("a leg boarding at a terminus still gets geometry",
+          terminus is not None and len(terminus) > 10)
+
     # ...but asking for one service explicitly must still mean that service.
     check("an explicit service_id still filters",
           view.leg_shape("304", "King St West at Spadina Ave East Side",
@@ -561,7 +572,6 @@ def test_the_cli_delegates_to_the_pipeline():
 def test_a_finished_run_survives_an_unwritable_trace_dir():
     section("the log is not the product")
 
-    import stat
     import tempfile
 
     from transit.core import trace as trace_module
@@ -571,23 +581,55 @@ def test_a_finished_run_survives_an_unwritable_trace_dir():
     # that we could not file the paperwork about it. Found by mounting
     # traces/ read-only into the container: a correct itinerary reached the
     # browser as "OSError: [Errno 30] Read-only file system".
-    original = trace_module.TRACE_DIR
+    #
+    # WHY THIS PATCHES write_text INSTEAD OF CHMODDING A DIRECTORY, which is
+    # what it did first: os.chmod on Windows only toggles a read-only flag on
+    # FILES. Directories stay writable, so the setup silently did nothing,
+    # the write succeeded, and the test reported a passing behaviour as a
+    # bug in the code. A test whose setup quietly fails is indistinguishable
+    # from a test that found something — the same two-states-look-identical
+    # problem this suite exists to catch, arriving from inside the suite.
+    #
+    # Patching the call makes the failure the real one (an OSError from the
+    # write) on every platform, and cannot half-work.
+    original_write = Path.write_text
+    denied = OSError(30, "Read-only file system")
+
+    def refuse(self, *args, **kwargs):
+        raise denied
+
     with tempfile.TemporaryDirectory() as tmp:
-        locked = Path(tmp) / "locked"
-        locked.mkdir()
-        locked.chmod(stat.S_IRUSR | stat.S_IXUSR)          # r-x, no write
-        trace_module.TRACE_DIR = locked
+        saved_dir = trace_module.TRACE_DIR
+        trace_module.TRACE_DIR = Path(tmp)
+        Path.write_text = refuse
         try:
             path = trace_module.write(
                 "a question", "an answer", provider="test", model="test",
                 usage={}, cache_stats={}, flags={})
             check("write() returns instead of raising", path is not None)
-            check("and the file really wasn't written", not path.exists())
         except OSError as exc:
             check("write() did not raise OSError", False, f"raised {exc}")
         finally:
-            trace_module.TRACE_DIR = original
-            locked.chmod(stat.S_IRWXU)
+            Path.write_text = original_write
+            trace_module.TRACE_DIR = saved_dir
+
+        check("and nothing was actually written",
+              not list(Path(tmp).iterdir()))
+
+    # The guard must not swallow a working write. A handler that turns every
+    # save into a no-op would pass the test above and lose every trace.
+    with tempfile.TemporaryDirectory() as tmp:
+        saved_dir = trace_module.TRACE_DIR
+        trace_module.TRACE_DIR = Path(tmp)
+        try:
+            path = trace_module.write(
+                "a question", "an answer", provider="test", model="test",
+                usage={}, cache_stats={}, flags={})
+            check("a writable directory still gets the trace", path.exists())
+            check("and latest.json alongside it",
+                  (Path(tmp) / "latest.json").exists())
+        finally:
+            trace_module.TRACE_DIR = saved_dir
 
 
 if __name__ == "__main__":

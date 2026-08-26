@@ -1,98 +1,74 @@
-"""Journey planning: direct rides and single-transfer routes with real times.
+"""Journey planning: real journeys with any number of transfers.
 
 The capstone tool. Everything else left the model guessing at the hard part
 -- which stops, and where to transfer -- and guessing produced empty queries
-it then misread as "no service". Here the search happens in SQL over actual
-data, and the result is a fully-labelled set of legs so the model transcribes
-rather than reconstructs.
+it then misread as "no service".
+
+The search itself lives in raptor.py. This module turns coordinates into
+candidate stops, calls it, and renders the result as fully-labelled legs so
+the model transcribes rather than reconstructs.
 """
 
 import json
 import os
 import sqlite3
 
-from transit import paths
-from .transit import DB_PATH, find_nearby_stops
+from . import raptor
+from .transit import DB_PATH
 
-def _shift(t: str, minutes: int) -> str:
-    """Shift a GTFS time by minutes, keeping 24+ hour notation.
 
-    Clamped at zero: walking back 5 minutes from a 00:02 departure produced
-    '-1:57:00', which is not a time and fails schema validation. Rare, but
-    a 00:02 departure is exactly the kind of input nobody tests by hand.
+def _leg_dicts(tt, legs, origin_name, dest_name,
+               origin_walk_m, dest_walk_m) -> list:
+    """RAPTOR legs -> the shape the agent and the verifier already expect.
+
+    Every minute is an explicit leg, including both end walks and every
+    transfer walk. Returning bare distances once made the model invent the
+    labels and get them backwards — a final leg reading "Distillery Loop ->
+    Kensington Market". Anything the model has to reconstruct, it can
+    reconstruct wrong; transcription is safer than reasoning.
     """
-    h, m, s = (int(p) for p in t.split(":"))
-    total = max(0, h * 3600 + m * 60 + s + minutes * 60)
-    return f"{total // 3600:02d}:{(total % 3600) // 60:02d}:{total % 60:02d}"
+    out = []
+    first, last = legs[0], legs[-1]
 
+    walk_in = max(60, raptor._walk_seconds(origin_walk_m))
+    out.append({
+        "mode": "walk", "route": None,
+        "from": origin_name, "to": tt.stop_names[first.from_stop],
+        "from_stop": None, "to_stop": tt.stop_ids[first.from_stop],
+        "depart": raptor.civil(first.depart - walk_in),
+        "arrive": raptor.civil(first.depart),
+        "metres": round(origin_walk_m),
+    })
 
-def _with_walks(option: dict, origin_name: str, dest_name: str) -> dict:
-    """Add fully-labelled walking legs at both ends.
+    for leg in legs:
+        out.append({
+            "mode": "transit" if leg.mode == "ride" else "walk",
+            "route": leg.route,
+            # The pattern's final stop, which is what the sign on the front
+            # of the vehicle says. Cheap here, and it is the one thing a
+            # traveller uses to check they boarded the right direction.
+            "headsign": leg.headsign if hasattr(leg, "headsign") else None,
+            "from": tt.stop_names[leg.from_stop],
+            "to": tt.stop_names[leg.to_stop],
+            "from_stop": tt.stop_ids[leg.from_stop],
+            "to_stop": tt.stop_ids[leg.to_stop],
+            "depart": raptor.civil(leg.depart),
+            "arrive": raptor.civil(leg.arrive),
+            **({} if leg.mode == "ride" else
+               {"metres": round(raptor._metres(*tt.stop_pos[leg.from_stop],
+                                               *tt.stop_pos[leg.to_stop]))}),
+        })
 
-    Returning bare distances made the model invent the labels, and it got
-    them backwards: a final leg reading "Distillery Loop -> Kensington
-    Market". Anything the model has to reconstruct, it can reconstruct wrong.
-    Emitting complete legs turns a reasoning step into transcription.
-    """
-    legs = option["legs"]
-    walk_in = max(1, round(option["walk_to_stop_m"] / 75))
-    walk_out = max(1, round(option["walk_from_stop_m"] / 75))
-
-    # Interleave the transfer walk too, so every minute of the journey is an
-    # explicit leg and nothing has to be inferred.
-    middle = []
-    for i, leg in enumerate(legs):
-        middle.append({**leg, "mode": "transit"})
-        if i == 0 and len(legs) > 1:
-            middle.append({
-                "mode": "walk", "route": None,
-                "from": leg["to"], "to": legs[1]["from"],
-                "depart": leg["arrive"],
-                "arrive": _shift(leg["arrive"], option["transfer_walk_min"]),
-                "metres": option["transfer_walk_m"],
-            })
-
-    option["legs"] = [
-        {
-            "mode": "walk", "route": None,
-            "from": origin_name, "to": legs[0]["from"],
-            "depart": _shift(legs[0]["depart"], -walk_in),
-            "arrive": legs[0]["depart"],
-            "metres": option["walk_to_stop_m"],
-        },
-        *middle,
-        {
-            "mode": "walk", "route": None,
-            "from": legs[-1]["to"], "to": dest_name,
-            "depart": legs[-1]["arrive"],
-            "arrive": _shift(legs[-1]["arrive"], walk_out),
-            "metres": option["walk_from_stop_m"],
-        },
-    ]
-    option["depart"] = option["legs"][0]["depart"]
-    option["arrive"] = option["legs"][-1]["arrive"]
-    return option
-
-
-def _direct_leg(conn, origin: str, dest: str, after: str, service_id: str):
-    """One scheduled ride from origin to dest, or None."""
-    return conn.execute(
-        """
-        SELECT r.route_short_name, t.trip_headsign,
-               substr('0' || a.departure_time, -8),
-               substr('0' || b.arrival_time,   -8)
-        FROM trips t
-        JOIN routes r     ON r.route_id = t.route_id
-        JOIN stop_times a ON a.trip_id = t.trip_id AND a.stop_id = ?
-        JOIN stop_times b ON b.trip_id = t.trip_id AND b.stop_id = ?
-        WHERE t.service_id = ?
-          AND CAST(a.stop_sequence AS INT) < CAST(b.stop_sequence AS INT)
-          AND substr('0' || a.departure_time, -8) >= ?
-        ORDER BY substr('0' || a.departure_time, -8)
-        LIMIT 1
-        """,
-        (origin, dest, service_id, after),
-    ).fetchone()
+    walk_out = max(60, raptor._walk_seconds(dest_walk_m))
+    out.append({
+        "mode": "walk", "route": None,
+        "from": tt.stop_names[last.to_stop], "to": dest_name,
+        "from_stop": tt.stop_ids[last.to_stop], "to_stop": None,
+        "depart": raptor.civil(last.arrive),
+        "arrive": raptor.civil(last.arrive + walk_out),
+        "metres": round(dest_walk_m),
+    })
+    return out
 
 
 def plan_journey(
@@ -105,36 +81,34 @@ def plan_journey(
     origin_name: str = "origin",
     dest_name: str = "destination",
 ) -> str:
-    """Find a real journey between two coordinates: direct, or one transfer.
+    """Find a real journey between two coordinates, with any number of changes.
 
     The capstone tool. Everything before it left the agent guessing at the
     hard part -- WHICH stops to use and WHERE to transfer -- and guessing
-    produced empty queries it then misread as "no service". Here the search
-    happens in SQL, over actual data:
+    produced empty queries it then misread as "no service".
 
-      1. try every nearby-origin / nearby-destination pair for a direct ride
-      2. failing that, compute interchanges: stops reachable from the origin
-         that sit within 250m of a stop that can reach the destination
-      3. look up real times for both legs, requiring the second to depart
-         after the first arrives plus walking time
+    HOW THIS USED TO WORK, AND WHY IT DOESN'T ANYMORE. The first version
+    searched in SQL: every nearby-origin / nearby-destination pair for a
+    direct ride, then, failing that, an interchange join to find stops
+    reachable from one end that sit near stops reaching the other. Correct,
+    and it stopped there — two transfers would have been the cross product of
+    two large reachable sets. One transfer already took **308 seconds** on
+    Kensington Market to Scarborough Town Centre before returning nothing,
+    and the agent reported that as "No route found", which is a claim about
+    Toronto rather than about our code.
 
-    Note step 2 depends on which origin PLATFORM you start from. From
-    College/Augusta the 506 runs east along Carlton and never meets a route
-    to the Distillery; from Spadina/Nassau the 510 meets the 504 at King.
-    Same neighbourhood, different answer -- which is why this has to search
-    over candidate stops rather than pick one.
+    It now runs RAPTOR (see raptor.py): rounds instead of joins, so the
+    transfer count is a loop counter. The same journey takes **59ms** and
+    returns 510 -> Line 2 -> 129. Four transfers are as cheap as one.
     """
-    if not os.path.exists(DB_PATH):
-        return f"{DB_PATH} not found. Run `python scripts/load_gtfs.py` first."
-
-    # Reject placeholder coordinates. The model called this with (0, 0) before
-    # geocoding anything -- a wasted request that silently returned "no stops
-    # nearby", which reads like a fact about Toronto rather than about the
-    # arguments. Say plainly what went wrong and what to do first.
     for label, lat, lon in (
         ("origin", origin_lat, origin_lon),
         ("destination", dest_lat, dest_lon),
     ):
+        # Reject placeholder coordinates. The model called this with (0, 0)
+        # before geocoding anything -- a wasted request that silently
+        # returned "no stops nearby", which reads like a fact about Toronto
+        # rather than about the arguments.
         if (lat, lon) == (0, 0) or not (43.0 < lat < 44.5 and -80.5 < lon < -78.5):
             return (
                 f"The {label} coordinates ({lat}, {lon}) are not in the Toronto "
@@ -142,120 +116,70 @@ def plan_journey(
                 f"coordinates, then call plan_journey with those."
             )
 
-    conn = sqlite3.connect(paths.readonly_uri(DB_PATH), uri=True)
-    try:
-        # Candidate counts are a speed/quality tradeoff, and cutting them was
-        # the wrong lever: trimming destinations to 2 dropped Distillery Loop
-        # (3rd nearest) and turned a 34-minute answer into a 61-minute one.
-        # Keep the search wide and make it fast instead — run optimize_db.py
-        # to add the composite indexes this relies on.
-        origins = json.loads(find_nearby_stops(origin_lat, origin_lon, 800))[:4]
-        dests = json.loads(find_nearby_stops(dest_lat, dest_lon, 800))[:4]
-    except (json.JSONDecodeError, TypeError):
-        conn.close()
-        return "No transit stops near one or both coordinates."
+    if not os.path.exists(DB_PATH):
+        return f"{DB_PATH} not found. Run `python scripts/load_gtfs.py` first."
 
     try:
-        # --- 1. direct rides -------------------------------------------------
-        direct = []
-        for o in origins:
-            for d in dests:
-                hit = _direct_leg(conn, o["stop_id"], d["stop_id"],
-                                  after_time, service_id)
-                if hit:
-                    route, head, dep, arr = hit
-                    direct.append({
-                        "type": "direct",
-                        "legs": [{
-                            "route": route, "headsign": head,
-                            "from": o["stop_name"], "from_stop": o["stop_id"],
-                            "to": d["stop_name"], "to_stop": d["stop_id"],
-                            "depart": dep, "arrive": arr,
-                        }],
-                        "walk_to_stop_m": o["metres"],
-                        "walk_from_stop_m": d["metres"],
-                    })
-        if direct:
-            direct.sort(key=lambda j: j["legs"][0]["arrive"])
-            return json.dumps([_with_walks(o, origin_name, dest_name)
-                               for o in direct[:3]])
+        tt = raptor.timetable(service_id)
+    except sqlite3.Error as exc:
+        return f"Could not read the schedule: {exc}"
 
-        # --- 2. one transfer -------------------------------------------------
-        interchange_sql = """
-        WITH fwd AS (
-          SELECT DISTINCT b.stop_id FROM stop_times a
-          JOIN stop_times b ON b.trip_id = a.trip_id
-          WHERE a.stop_id = ?
-            AND CAST(b.stop_sequence AS INT) > CAST(a.stop_sequence AS INT)),
-        bwd AS (
-          SELECT DISTINCT a.stop_id FROM stop_times a
-          JOIN stop_times b ON b.trip_id = a.trip_id
-          WHERE b.stop_id = ?
-            AND CAST(a.stop_sequence AS INT) < CAST(b.stop_sequence AS INT))
-        SELECT sf.stop_id, sf.stop_name, sw.stop_id, sw.stop_name,
-               CAST(ROUND(111320.0*SQRT(
-                 POWER(CAST(sf.stop_lat AS REAL)-CAST(sw.stop_lat AS REAL),2) +
-                 POWER((CAST(sf.stop_lon AS REAL)-CAST(sw.stop_lon AS REAL))*0.723,2)
-               )) AS INT) AS gap
-        FROM fwd f JOIN stops sf ON sf.stop_id = f.stop_id,
-             bwd w JOIN stops sw ON sw.stop_id = w.stop_id
-        WHERE gap < 250
-        ORDER BY gap LIMIT 3
-        """
+    near_origin = tt.nearest(origin_lat, origin_lon, raptor.ACCESS_RADIUS_M)
+    near_dest = tt.nearest(dest_lat, dest_lon, raptor.ACCESS_RADIUS_M)
+    if not near_origin or not near_dest:
+        which = "origin" if not near_origin else "destination"
+        return (f"No transit stops within {raptor.ACCESS_RADIUS_M}m of the "
+                f"{which}.")
 
-        options = []
-        seen_shapes = set()
-        for o in origins:
-            for d in dests:
-                for xa, xa_name, xb, xb_name, gap in conn.execute(
-                    interchange_sql, (o["stop_id"], d["stop_id"])
-                ).fetchall():
-                    leg1 = _direct_leg(conn, o["stop_id"], xa,
-                                       after_time, service_id)
-                    if not leg1:
-                        continue
-                    # Allow 1 minute per 60m of walking, minimum 2 minutes.
-                    walk_min = max(2, round(gap / 60))
-                    h, m, s = (int(p) for p in leg1[3].split(":"))
-                    ready = h * 3600 + m * 60 + s + walk_min * 60
-                    ready_str = f"{ready//3600:02d}:{(ready%3600)//60:02d}:{ready%60:02d}"
+    # Candidate counts are a speed/quality tradeoff, and cutting them was
+    # once the wrong lever: trimming destinations to 2 dropped Distillery
+    # Loop (3rd nearest) and turned a 34-minute answer into a 61-minute one.
+    # RAPTOR is fast enough to keep the search wide.
+    origins = [(i, raptor._walk_seconds(m)) for i, m in near_origin[:15]]
+    dests = [(i, raptor._walk_seconds(m)) for i, m in near_dest[:15]]
+    origin_walk = dict(near_origin)
+    dest_walk = dict(near_dest)
 
-                    leg2 = _direct_leg(conn, xb, d["stop_id"],
-                                       ready_str, service_id)
-                    if not leg2:
-                        continue
-                    # Two interchanges one block apart on the same pair of
-                    # routes are the same journey to a traveller.
-                    shape = (leg1[0], leg2[0])
-                    if shape in seen_shapes:
-                        continue
-                    seen_shapes.add(shape)
-                    options.append({
-                        "type": "one_transfer",
-                        "legs": [
-                            {"route": leg1[0], "headsign": leg1[1],
-                             "from": o["stop_name"], "from_stop": o["stop_id"],
-                             "to": xa_name, "to_stop": xa,
-                             "depart": leg1[2], "arrive": leg1[3]},
-                            {"route": leg2[0], "headsign": leg2[1],
-                             "from": xb_name, "from_stop": xb,
-                             "to": d["stop_name"], "to_stop": d["stop_id"],
-                             "depart": leg2[2], "arrive": leg2[3]},
-                        ],
-                        "transfer_walk_m": gap,
-                        "transfer_walk_min": walk_min,
-                        "walk_to_stop_m": o["metres"],
-                        "walk_from_stop_m": d["metres"],
-                    })
-        if not options:
-            return (
-                "No direct or single-transfer journey found between these "
-                "coordinates after {t}. The trip may need two transfers, or "
-                "there may be no service at that hour.".format(t=after_time)
-            )
+    after = raptor._secs(after_time)
+    options = []
+    seen = set()
 
-        options.sort(key=lambda j: j["legs"][-1]["arrive"])
-        return json.dumps([_with_walks(o, origin_name, dest_name)
-                           for o in options[:3]])
-    finally:
-        conn.close()
+    # Three departures, not one. The earliest arrival is the right answer to
+    # "when can I get there", but a traveller wants to see that missing it
+    # isn't fatal. Each pass starts a minute after the previous boarding.
+    for _ in range(3):
+        legs = raptor.query(tt, origins, dests, after)
+        if not legs:
+            break
+        rides = [l for l in legs if l.mode == "ride"]
+        if not rides:
+            break
+
+        shape = tuple((l.route, l.depart) for l in rides)
+        if shape not in seen:
+            seen.add(shape)
+            options.append({
+                "type": ("direct" if len(rides) == 1
+                         else f"{len(rides) - 1}_transfer"),
+                "transfers": len(rides) - 1,
+                "legs": _leg_dicts(tt, legs, origin_name, dest_name,
+                                   origin_walk.get(legs[0].from_stop, 0),
+                                   dest_walk.get(legs[-1].to_stop, 0)),
+                "depart": raptor.civil(rides[0].depart),
+                "arrive": raptor.civil(rides[-1].arrive),
+                "total_min": round((rides[-1].arrive - rides[0].depart) / 60),
+            })
+        after = rides[0].depart + 60
+
+    if not options:
+        # Say which kind of nothing this is. A limit of the search reported
+        # as a fact about the city is the failure this tool used to have.
+        return (
+            f"No journey found departing after {after_time} on service "
+            f"{service_id}. The search covered up to four transfers from "
+            f"{len(origins)} nearby origin stops, so this is more likely no "
+            f"service at that hour than a missing route — but say that it "
+            f"wasn't found, not that it doesn't exist."
+        )
+
+    return json.dumps(options)
